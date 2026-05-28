@@ -157,16 +157,25 @@ void loop() {
         commandQueueTail = (commandQueueTail + 1) % COMMAND_QUEUE_SIZE;
         writeSerial("Command processed");
     }
-    if (pTxCharacteristic && pServer && pServer->getConnectedCount() > 0) {
-        uint8_t bleDrain = 0;
-        while (responseQueueTail != responseQueueHead && bleDrain < 16) {
-            writeSerial("ESP32: Sending queued response (" + String(responseQueue[responseQueueTail].len) + " bytes)");
-            pTxCharacteristic->setValue(responseQueue[responseQueueTail].data, responseQueue[responseQueueTail].len);
-            pTxCharacteristic->notify();
-            responseQueue[responseQueueTail].pending = false;
-            responseQueueTail = (responseQueueTail + 1) % RESPONSE_QUEUE_SIZE;
-            writeSerial("Response sent successfully");
-            bleDrain++;
+    if (responseQueueTail != responseQueueHead) {
+        if (esp32_ble_notify_enabled()) {
+            uint8_t bleDrain = 0;
+            while (responseQueueTail != responseQueueHead && bleDrain < 16) {
+                writeSerial("ESP32: Sending queued response (" + String(responseQueue[responseQueueTail].len) + " bytes)");
+                pTxCharacteristic->setValue(responseQueue[responseQueueTail].data, responseQueue[responseQueueTail].len);
+                pTxCharacteristic->notify();
+                responseQueue[responseQueueTail].pending = false;
+                responseQueueTail = (responseQueueTail + 1) % RESPONSE_QUEUE_SIZE;
+                writeSerial("Response sent successfully");
+                bleDrain++;
+            }
+        } else if (pServer && pServer->getConnectedCount() > 0) {
+            // Connected but CCCD not enabled yet — keep responses queued
+        } else {
+            while (responseQueueTail != responseQueueHead) {
+                responseQueue[responseQueueTail].pending = false;
+                responseQueueTail = (responseQueueTail + 1) % RESPONSE_QUEUE_SIZE;
+            }
         }
     }
     if (bleRestartAdvertisingPending) {
@@ -200,14 +209,17 @@ void loop() {
                 firstBootDelayInitialized = true;
                 firstBootDelayStart = millis();
                 processButtonEvents();
-                writeSerial("First boot: waiting 60s before entering deep sleep");
+                writeSerial("First boot: waiting 2 minutes before entering deep sleep");
             }
             uint32_t elapsed = millis() - firstBootDelayStart;
-            if (elapsed < 60000) {
+            if (elapsed < FIRST_BOOT_DEEP_SLEEP_DELAY_MS) {
                 idleDelay(5);
                 return;
             }
-            writeSerial("First boot delay elapsed, deep sleep permitted");
+            if (!firstBootDelayElapsed) {
+                firstBootDelayElapsed = true;
+                writeSerial("First boot delay elapsed, deep sleep permitted");
+            }
         }
         if(globalConfig.power_option.deep_sleep_time_seconds > 0 && globalConfig.power_option.power_mode == 1){
             enterDeepSleep();
@@ -215,10 +227,13 @@ void loop() {
         else{
             idleDelay(2000);
         }
-        updatemsdata();
+        static uint32_t lastMsdUpdate = 0;
+        if (millis() - lastMsdUpdate >= 60000) {
+            lastMsdUpdate = millis();
+            updatemsdata();
+        }
         processButtonEvents();
         processTouchInput();
-        if(!bleActive)writeSerial("Loop end: " + String(millis() / 100));
     }
     #else
     if(globalConfig.power_option.sleep_timeout_ms > 0){
@@ -305,7 +320,10 @@ void enterDeepSleep() {
             writeSerial("BLE advertising stopped");
         }
     }
+    delay(200);
     BLEDevice::deinit(true);
+    esp32_ble_clear_handles();
+    delay(100);
     writeSerial("BLE deinitialized");
     uint64_t sleep_timeout_us = (uint64_t)globalConfig.power_option.deep_sleep_time_seconds * 1000000ULL;
     esp_sleep_enable_timer_wakeup(sleep_timeout_us);

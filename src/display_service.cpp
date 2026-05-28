@@ -1023,6 +1023,7 @@ void initDisplay(){
         writeSerial(String("Width: ") + String(globalConfig.displays[0].pixel_width), true);
         bbepWakeUp(&bbep);
         bbepSendCMDSequence(&bbep, bbep.pInitFull);
+        delay(200);
         if (! (globalConfig.displays[0].transmission_modes & TRANSMISSION_MODE_CLEAR_ON_BOOT)){
             writeBootScreenWithQr();
             writeSerial("EPD refresh: FULL (boot)", true);
@@ -1136,26 +1137,41 @@ void updatemsdata(){
 #endif
 #ifdef TARGET_ESP32
     if (advertisementData != nullptr) {
+        static uint8_t prev_msd_payload[16] = {0xFF};
+        if (memcmp(prev_msd_payload, msd_payload, 16) == 0) {
+            mloopcounter++;
+            mloopcounter &= 0x0F;
+            return;
+        }
+        memcpy(prev_msd_payload, msd_payload, 16);
         String manufacturerDataStr;
         manufacturerDataStr.reserve(16);
         for (int i = 0; i < 16; i++) manufacturerDataStr += (char)msd_payload[i];
         advertisementData->setManufacturerData(manufacturerDataStr);
         BLEAdvertising *pAdvertising = (pServer != nullptr) ? pServer->getAdvertising() : BLEDevice::getAdvertising();
         if (pAdvertising != nullptr) {
-            pAdvertising->stop();
-            BLEAdvertisementData freshAdvertisementData;
-            static String savedDeviceName = "";
-            if (savedDeviceName.length() == 0) savedDeviceName = "OD" + getChipIdHex();
-            freshAdvertisementData.setName(savedDeviceName);
-            freshAdvertisementData.setFlags(0x06);
-            freshAdvertisementData.setManufacturerData(manufacturerDataStr);
-            *advertisementData = freshAdvertisementData;
-            pAdvertising->setAdvertisementData(freshAdvertisementData);
-            if (pService != nullptr) pAdvertising->addServiceUUID(pService->getUUID());
-            pAdvertising->setScanResponse(false);
-            pAdvertising->setMinPreferred(0x06);
-            pAdvertising->setMinPreferred(0x12);
-            pAdvertising->start();
+            if (pServer != nullptr && pServer->getConnectedCount() > 0) {
+                *advertisementData = BLEAdvertisementData();
+                advertisementData->setName("OD" + getChipIdHex());
+                advertisementData->setFlags(0x06);
+                advertisementData->setManufacturerData(manufacturerDataStr);
+            } else {
+                pAdvertising->stop();
+                BLEAdvertisementData freshAdvertisementData;
+                static String savedDeviceName = "";
+                if (savedDeviceName.length() == 0) savedDeviceName = "OD" + getChipIdHex();
+                freshAdvertisementData.setName(savedDeviceName);
+                freshAdvertisementData.setFlags(0x06);
+                freshAdvertisementData.setManufacturerData(manufacturerDataStr);
+                *advertisementData = freshAdvertisementData;
+                pAdvertising->setAdvertisementData(freshAdvertisementData);
+                if (pService != nullptr) pAdvertising->addServiceUUID(pService->getUUID());
+                pAdvertising->setScanResponse(false);
+                pAdvertising->setMinPreferred(0x06);
+                pAdvertising->setMinPreferred(0x12);
+                delay(50);
+                pAdvertising->start();
+            }
         }
     }
     opendisplay_mdns_update_msd_txt();

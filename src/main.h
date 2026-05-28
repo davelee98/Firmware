@@ -326,8 +326,10 @@ RTC_DATA_ATTR uint32_t deep_sleep_count = 0;
 bool advertising_timeout_active = false;
 uint32_t advertising_start_time = 0;
 
-// First-boot holdoff before allowing deep sleep
+// First-boot holdoff before allowing deep sleep (2 minutes)
+static constexpr uint32_t FIRST_BOOT_DEEP_SLEEP_DELAY_MS = 120000;
 static bool firstBootDelayInitialized = false;
+static bool firstBootDelayElapsed = false;
 static uint32_t firstBootDelayStart = 0;
 #endif
 
