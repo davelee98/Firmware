@@ -57,7 +57,13 @@ void powerOff() {
     gpio_set_direction(latch, GPIO_MODE_OUTPUT);
     gpio_set_level(latch, 0);
     esp_sleep_config_gpio_isolate();
+    #if defined(CONFIG_IDF_TARGET_ESP32C6)
+    // The ESP32-C6 does not support or need the global hold function.
+    // It is intentionally left blank here.
+    #else
+    // Compiles for ESP32, ESP32-S3, and ESP32-C3 based on your platformio.ini
     gpio_deep_sleep_hold_en();
+    #endif
     gpio_hold_en(latch);
 #if SOC_GPIO_SUPPORT_DEEPSLEEP_WAKEUP
     if (hasButton()) {
@@ -104,7 +110,13 @@ void powerLatchHoldForSleep() {
     if (!latchEnabled()) return;
     gpio_set_direction(latchPin(), GPIO_MODE_OUTPUT);
     gpio_set_level(latchPin(), 1);
+    #if defined(CONFIG_IDF_TARGET_ESP32C6)
+    // The ESP32-C6 does not support or need the global hold function.
+    // It is intentionally left blank here.
+    #else
+    // Compiles for ESP32, ESP32-S3, and ESP32-C3 based on your platformio.ini
     gpio_deep_sleep_hold_en();
+    #endif
     gpio_hold_en(latchPin());
 }
 
