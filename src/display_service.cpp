@@ -111,7 +111,9 @@ bool waitforrefresh(int timeout);
 
 #ifdef TARGET_NRF
 static bool nrfVbusPresent() {
-    return (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+    //ignored for now
+    //return (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+    return false;
 }
 #else
 static bool nrfVbusPresent() { return true; }
