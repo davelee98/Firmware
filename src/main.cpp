@@ -407,6 +407,10 @@ void pwrmgm(bool onoff){
             }
             delay(100);
         } else {
+            if (disp.reset_pin != 0xFF) {
+                pinMode(disp.reset_pin, OUTPUT);
+                digitalWrite(disp.reset_pin, HIGH);
+            }
             delay(200);
         }
         initOrRestoreWireForOpenDisplay();
@@ -419,8 +423,8 @@ void pwrmgm(bool onoff){
             Wire.end();
             invalidateOpenDisplayWire();
         }
-        configureDisplayPinsLowPower();
         if (globalConfig.system_config.pwr_pin != 0xFF) {
+            configureDisplayPinsLowPower();
             digitalWrite(globalConfig.system_config.pwr_pin, LOW);
         }
     }

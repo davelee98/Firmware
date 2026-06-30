@@ -228,6 +228,17 @@ static void writeGray4PlaneRow(const uint8_t* row2bpp, int pitch2bpp, int planeP
     bbepWriteData(&bbep, planeRow, planePitch);
 }
 
+static const uint8_t kSchemeWhiteValue[] = {
+    0xFF,  // 0: COLOR_SCHEME_MONO   — 1bpp, bit 1 = white
+    0xFF,  // 1: COLOR_SCHEME_BWR    — 1bpp bitplane, all-ones = white plane
+    0xFF,  // 2: COLOR_SCHEME_BWY    — 1bpp bitplane
+    0x55,  // 3: COLOR_SCHEME_BWRY   — 2bpp, code 01b per pixel = white
+    0x11,  // 4: COLOR_SCHEME_BWGBRY — 4bpp Spectra6, nibble 1 = white
+    0xFF,  // 5: COLOR_SCHEME_GRAY4  — 2bpp gray, code 11b per pixel = white
+    0xFF,  // 6: COLOR_SCHEME_GRAY16 — 4bpp Seeed 16-gray, nibble 15 = white
+    0xFF,  // 7: COLOR_SCHEME_GRAY8  — 1bpp (default)
+};
+
 bool writeBootScreenWithQr() {
     const uint16_t w = globalConfig.displays[0].pixel_width;
     const uint16_t h = globalConfig.displays[0].pixel_height;
@@ -235,17 +246,12 @@ bool writeBootScreenWithQr() {
     const bool useBitplanes = (colorScheme == COLOR_SCHEME_BWR || colorScheme == COLOR_SCHEME_BWY);
     const int bitsPerPixel = getBitsPerPixel();
     int pitch;
-    uint8_t whiteValue;
-    if (bitsPerPixel == 4) {
-        pitch = w / 2;
-        whiteValue = 0x11; // for 4bpp spectra 6 panel, white is 0x11.  It MAY be 0xFF for other panels, so in production need to VERIFY THIS!!!
-    } else if (bitsPerPixel == 2) {
-        pitch = (w + 3) / 4;
-        whiteValue = (colorScheme == COLOR_SCHEME_GRAY4) ? 0xFF : 0x55;
-    } else {
-        pitch = (w + 7) / 8;
-        whiteValue = 0xFF;
-    }
+    if (bitsPerPixel == 4) pitch = w / 2;
+    else if (bitsPerPixel == 2) pitch = (w + 3) / 4;
+    else pitch = (w + 7) / 8;
+    uint8_t whiteValue = (colorScheme < sizeof(kSchemeWhiteValue))
+        ? kSchemeWhiteValue[colorScheme]
+        : 0xFF;
 
     String chipId = getChipIdHex();
     if (chipId.length() < 6) {
@@ -356,7 +362,7 @@ bool writeBootScreenWithQr() {
     // bb_epaper 4-gray (scheme 5) needs the packed 2bpp image split into two
     // 1-bit controller planes, so render the frame once per plane and
     // de-interleave. Every other scheme writes a single packed plane in one pass.
-    const bool gray4Split = (colorScheme == 5)
+    const bool gray4Split = (colorScheme == COLOR_SCHEME_GRAY4)
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
         && !seeed_driver_used()
 #endif
