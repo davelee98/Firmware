@@ -1059,7 +1059,7 @@ static void renderChar_4BPP(uint8_t* rowBuffer, const uint8_t* fontData, int fon
 }
 
 static void renderChar_2BPP(uint8_t* rowBuffer, const uint8_t* fontData, int fontRow, int charIdx, int startX, int charWidth, int pitch, uint8_t colorScheme, int fontScale) {
-    uint8_t whiteCode = (colorScheme == 5) ? 0x03 : 0x01;
+    uint8_t whiteCode = (colorScheme == COLOR_SCHEME_GRAY4) ? 0x03 : 0x01;
     int pixelsPerByte = 4;
     for (int col = 0; col < charWidth; col += pixelsPerByte) {
         uint8_t pixelByte = 0;
@@ -1179,9 +1179,9 @@ void initDisplay(){
 
 int getplane() {
     uint8_t colorScheme = globalConfig.displays[0].color_scheme;
-    if (colorScheme == 0 || colorScheme == COLOR_SCHEME_GRAY16) return PLANE_0;
-    if (colorScheme == 1 || colorScheme == 2) return PLANE_0;
-    if (colorScheme == 5) return PLANE_1;
+    if (colorScheme == COLOR_SCHEME_MONO || colorScheme == COLOR_SCHEME_GRAY16) return PLANE_0;
+    if (colorScheme == COLOR_SCHEME_BWR || colorScheme == COLOR_SCHEME_BWY) return PLANE_0;
+    if (colorScheme == COLOR_SCHEME_GRAY4) return PLANE_1;
     return PLANE_1;
 }
 
@@ -1192,9 +1192,9 @@ int getBitsPerPixel() {
         return 4;
     }
 #endif
-    if (globalConfig.displays[0].color_scheme == 4) return 4;
-    if (globalConfig.displays[0].color_scheme == 3) return 2;
-    if (globalConfig.displays[0].color_scheme == 5) return 2;
+    if (globalConfig.displays[0].color_scheme == COLOR_SCHEME_BWGBRY) return 4;
+    if (globalConfig.displays[0].color_scheme == COLOR_SCHEME_BWRY) return 2;
+    if (globalConfig.displays[0].color_scheme == COLOR_SCHEME_GRAY4) return 2;
     return 1;
 }
 
@@ -1346,7 +1346,7 @@ void handleDirectWriteCompressedData(uint8_t* data, uint16_t len) {
 // True when the active display uses the bb_epaper 4-gray scheme (two 1-bit
 // controller planes). The Seeed driver path has its own 4bpp handling.
 static inline bool directWriteIsGray4(void) {
-    return (globalConfig.displays[0].color_scheme == 5)
+    return (globalConfig.displays[0].color_scheme == COLOR_SCHEME_GRAY4)
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
         && !seeed_driver_used()
 #endif
@@ -1420,7 +1420,7 @@ if (partialCtx.active) cleanup_partial_write_state();
     }
 #endif
     uint8_t colorScheme = globalConfig.displays[0].color_scheme;
-    directWriteBitplanes = (colorScheme == 1 || colorScheme == 2);
+    directWriteBitplanes = (colorScheme == COLOR_SCHEME_BWR || colorScheme == COLOR_SCHEME_BWY);
     directWritePlane2 = false;
     directWriteCompressed = (len >= 4);
     directWriteWidth = globalConfig.displays[0].pixel_width;
