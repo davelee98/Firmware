@@ -1,4 +1,5 @@
 #include "config_parser.h"
+#include "factory_config.h"
 #include "structs.h"
 #include "encryption_state.h"
 #include "encryption.h"
@@ -121,6 +122,26 @@ bool saveConfig(uint8_t* configData, uint32_t len){
     return true;
 }
 
+bool clearStoredConfig(void) {
+    #ifdef TARGET_NRF
+    if (InternalFS.exists(CONFIG_FILE_PATH)) {
+        if (!InternalFS.remove(CONFIG_FILE_PATH)) {
+            writeSerial("ERROR: Failed to remove config file");
+            return false;
+        }
+    }
+    #elif defined(TARGET_ESP32)
+    if (LittleFS.exists(CONFIG_FILE_PATH)) {
+        if (!LittleFS.remove(CONFIG_FILE_PATH)) {
+            writeSerial("ERROR: Failed to remove config file");
+            return false;
+        }
+    }
+    #endif
+    memset(&globalConfig, 0, sizeof(globalConfig));
+    return true;
+}
+
 bool loadConfig(uint8_t* configData, uint32_t* len){
     #ifdef TARGET_NRF
     File file = InternalFS.open(CONFIG_FILE_PATH, FILE_O_READ);
@@ -170,6 +191,21 @@ bool loadConfig(uint8_t* configData, uint32_t* len){
     }
     *len = config.data_len;
     return true;
+}
+
+bool hasValidStoredConfig(void) {
+#ifdef TARGET_NRF
+    if (!InternalFS.exists(CONFIG_FILE_PATH)) {
+        return false;
+    }
+#elif defined(TARGET_ESP32)
+    if (!LittleFS.exists(CONFIG_FILE_PATH)) {
+        return false;
+    }
+#endif
+    static uint8_t buf[MAX_CONFIG_SIZE];
+    uint32_t len = MAX_CONFIG_SIZE;
+    return loadConfig(buf, &len);
 }
 
 uint32_t calculateConfigCRC(uint8_t* data, uint32_t len){
@@ -741,11 +777,21 @@ void printConfigSummary(){
 
 void full_config_init() {
     writeSerial("Initializing config storage...");
-    if (initConfigStorage()) {
-        writeSerial("Config storage initialized successfully");
-    } else {
+    if (!initConfigStorage()) {
         writeSerial("Config storage initialization failed");
+        return;
     }
+    writeSerial("Config storage initialized successfully");
+
+#ifdef FACTORY_CLEAR_CONFIG_ON_BOOT
+    writeSerial("Factory clear build: erasing stored config");
+    clearStoredConfig();
+    writeSerial("Config cleared; skipping load");
+    return;
+#endif
+
+    tryProvisionFactoryEmbed();
+
     writeSerial("Loading global configuration...");
     if (loadGlobalConfig()) {
         writeSerial("Global configuration loaded successfully");

@@ -398,6 +398,20 @@ void handleWriteConfig(uint8_t* data, uint16_t len) {
     sendResponse(ok ? responseOk : responseErr, 4);
 }
 
+void handleClearConfig(void) {
+    writeSerial("=== CLEAR CONFIG COMMAND (0x0045) ===");
+    uint8_t responseOk[] = {0x00, 0x45, 0x00, 0x00};
+    uint8_t responseErr[] = {0xFF, 0x45, 0x00, 0x00};
+
+    if (!clearStoredConfig()) {
+        sendResponse(responseErr, sizeof(responseErr));
+        return;
+    }
+
+    writeSerial("Stored config cleared");
+    sendResponse(responseOk, sizeof(responseOk));
+}
+
 void handleWriteConfigChunk(uint8_t* data, uint16_t len) {
     if (!chunkedWriteState.active) {
         uint8_t errorResponse[] = {0xFF, 0x42, 0x00, 0x00};
@@ -537,6 +551,10 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
         case 0x0042:
             writeSerial("=== WRITE CONFIG CHUNK COMMAND (0x0042) ===");
             handleWriteConfigChunk(data + 2, len - 2);
+            break;
+        case 0x0045:
+            writeSerial("=== CLEAR CONFIG COMMAND (0x0045) ===");
+            handleClearConfig();
             break;
         case 0x000F:
             writeSerial("=== Reboot COMMAND (0x000F) ===");

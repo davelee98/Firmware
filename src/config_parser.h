@@ -17,7 +17,9 @@ typedef struct {
 bool initConfigStorage();
 void formatConfigStorage();
 bool saveConfig(uint8_t* configData, uint32_t len);
+bool clearStoredConfig(void);
 bool loadConfig(uint8_t* configData, uint32_t* len);
+bool hasValidStoredConfig(void);
 uint32_t calculateConfigCRC(uint8_t* data, uint32_t len);
 bool loadGlobalConfig();
 void printConfigSummary();

@@ -133,6 +133,43 @@ static void bytesToHex(const uint8_t* in, uint16_t len, char* out, uint16_t outS
     out[len * 2] = '\0';
 }
 
+static bool bootKeyIsAllZero() {
+    for (int i = 0; i < 16; i++) {
+        if (securityConfig.encryption_key[i] != 0) return false;
+    }
+    return true;
+}
+
+static void formatBootKeyDisplay(char* out, uint16_t outSize) {
+    const uint16_t hexLen = 32;
+    if (!out || outSize < hexLen + 1) {
+        if (out && outSize > 0) out[0] = '\0';
+        return;
+    }
+    if (bootKeyIsAllZero()) {
+        for (uint16_t i = 0; i < hexLen; i++) out[i] = '-';
+        out[hexLen] = '\0';
+    } else if (!(securityConfig.flags & SECURITY_FLAG_SHOW_KEY_ON_SCREEN)) {
+        for (uint16_t i = 0; i < hexLen; i++) out[i] = 'X';
+        out[hexLen] = '\0';
+    } else {
+        bytesToHex(securityConfig.encryption_key, 16, out, outSize);
+    }
+}
+
+static void bootFormatKeyLine(char* out, size_t outSize, const char* label,
+                              const uint8_t* keyBytes, uint8_t numBytes) {
+    if (bootKeyIsAllZero()) {
+        snprintf(out, outSize, "%s not set", label);
+    } else if (!(securityConfig.flags & SECURITY_FLAG_SHOW_KEY_ON_SCREEN)) {
+        snprintf(out, outSize, "%s hidden", label);
+    } else {
+        char hex[17];
+        bytesToHex(keyBytes, numBytes, hex, sizeof(hex));
+        snprintf(out, outSize, "%s %s", label, hex);
+    }
+}
+
 static inline void setBootPixelBlack(uint8_t* row, uint16_t x, int pitch, int bitsPerPixel, uint8_t colorScheme) {
     if (bitsPerPixel == 1) {
         int bytePos = x / 8;
@@ -265,7 +302,186 @@ static uint16_t bootMaxTextWidth(const char* const* lines, unsigned n, int scale
     return maxW;
 }
 
-static bool bootLayoutFit(uint16_t w, uint16_t h, int blockH, int pad, int qrModules, int* modulePxOut,
+static void formatBootColorSchemeText(uint8_t scheme, char* out, uint16_t outSize) {
+    if (!out || outSize == 0) return;
+    switch (scheme) {
+        case COLOR_SCHEME_MONO:    snprintf(out, outSize, "BW"); break;
+        case COLOR_SCHEME_BWR:     snprintf(out, outSize, "BWR"); break;
+        case COLOR_SCHEME_BWY:     snprintf(out, outSize, "BWY"); break;
+        case COLOR_SCHEME_BWRY:    snprintf(out, outSize, "BWRY"); break;
+        case COLOR_SCHEME_BWGBRY:  snprintf(out, outSize, "6 color"); break;
+        case COLOR_SCHEME_GRAY4:   snprintf(out, outSize, "4 gray"); break;
+        case COLOR_SCHEME_GRAY16:  snprintf(out, outSize, "16 gray"); break;
+        case COLOR_SCHEME_GRAY8:   snprintf(out, outSize, "7 color"); break;
+        default:                   snprintf(out, outSize, "?"); break;
+    }
+}
+
+// QR module pixel cap by panel size (qrModules=49 for v6 + quiet zone).
+// 1872x1404: smaller text leaves more width for QR (~13 modules); height allows ~18.
+static int bootQrModuleMax(uint16_t w, uint16_t h_full) {
+    if (w >= 1872 && h_full >= 1404) return 18;
+    if (w >= 1600 && h_full >= 1200) return 16;
+    if (w >= 1200 && h_full >= 900)  return 12;
+    if (w >= 800 && h_full >= 600)   return 8;
+    if (w >= 800 && h_full >= 480)   return 7;
+    if (w >= 600 && h_full >= 400 && h_full < 600) return 7;
+    return 6;
+}
+
+// Max text scale for the middle zone (header/footer use their own logic).
+static int bootMiddleScaleHi(uint16_t w_log, uint16_t h_log, bool useHighResLayout) {
+    if (w_log >= 1600 && h_log >= 1200) return 10;
+    if (w_log >= 800 && h_log >= 600) return 8;
+    if (!useHighResLayout) return 2;
+    if (h_log < 600) return (w_log >= 600) ? 3 : 2;
+    return 6;
+}
+
+static int bootMiddlePad(int scale, uint16_t w_log, uint16_t h_log, bool useZoneLayout) {
+    if (useZoneLayout && w_log < 800 && h_log >= 400 && h_log < 600) return 4 * scale;
+    return 6 * scale;
+}
+
+static int bootFooterInfoScale(int scaleText, int footerH, int footerPadTop,
+                               const char* const* segs, int numSegs, int bandW) {
+    if (scaleText <= 1) return 1;
+    const int minSwatchH = 12;
+    for (int s = scaleText - 1; s >= 1; s--) {
+        if (footerH - footerPadTop - (7 * s + 4) < minSwatchH) continue;
+        int totalW = 0;
+        for (int i = 0; i < numSegs; i++) totalW += (int)bootTextWidth(segs[i], (uint8_t)s);
+        if (totalW + (numSegs + 1) <= bandW) return s;
+    }
+    return 1;
+}
+
+static void bootFooterLayoutSegs(const char* const* segs, int numSegs, int scale,
+                                 int bandLeft, int bandRight, int* xOut) {
+    if (numSegs <= 0) return;
+    int totalW = 0;
+    for (int i = 0; i < numSegs; i++) totalW += (int)bootTextWidth(segs[i], (uint8_t)scale);
+    const int bandW = bandRight - bandLeft;
+    const int gap = (bandW > totalW) ? (bandW - totalW) / (numSegs + 1) : 0;
+    int x = bandLeft + gap;
+    for (int i = 0; i < numSegs; i++) {
+        xOut[i] = x;
+        x += (int)bootTextWidth(segs[i], (uint8_t)scale) + gap;
+    }
+}
+
+static bool bootFooterTextPixelBlack(uint16_t lx, uint16_t ly, uint16_t footerInfoY,
+                                     const char* const* segs, const int* segX, int numSegs,
+                                     uint8_t scale, uint16_t w_log, int bandRight) {
+    for (int i = 0; i < numSegs; i++) {
+        if (bootTextPixelBlack(lx, ly, (uint16_t)segX[i], footerInfoY, segs[i], scale, w_log, bandRight)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int bootHeaderLineGap(int manufScale, int modelScale) {
+    int g = (manufScale + modelScale) / 2;
+    return g < 4 ? 4 : g;
+}
+
+static int bootHeaderBlockH(const char* manuf, const char* model, int manufScale, int modelScale) {
+    const int gap = bootHeaderLineGap(manufScale, modelScale);
+    if (manuf[0] && model[0]) return 7 * manufScale + gap + 7 * modelScale;
+    if (manuf[0]) return 7 * manufScale;
+    if (model[0]) return 7 * modelScale;
+    return 0;
+}
+
+static bool bootHeaderTextFits(int headerH, const char* manuf, const char* model,
+                               int manufScale, int modelScale,
+                               int manufMaxW, int modelMaxW) {
+    const int blockH = bootHeaderBlockH(manuf, model, manufScale, modelScale);
+    if (blockH == 0) return true;
+    if (blockH > headerH - 8) return false;
+    if (manuf[0] && bootTextWidth(manuf, (uint8_t)manufScale) > (uint16_t)manufMaxW) return false;
+    if (model[0] && bootTextWidth(model, (uint8_t)modelScale) > (uint16_t)modelMaxW) return false;
+    return true;
+}
+
+static int bootHeaderMaxScaleForLine(const char* text, int maxW) {
+    if (!text || !text[0]) return 1;
+    const uint16_t baseW = bootTextWidth(text, 1);
+    if (baseW == 0) return 1;
+    int s = maxW / (int)baseW;
+    if (s < 1) return 1;
+    if (s > 32) return 32;
+    return s;
+}
+
+static void bootHeaderWidthBudgets(int availW, int* modelMaxW, int* manufMaxW) {
+    *modelMaxW = (availW * 5) / 6;
+    *manufMaxW = availW / 4;
+}
+
+static void bootPickHeaderScales(int headerH, int headerMaxX, int pad,
+                                 const char* manuf, const char* model,
+                                 int* manufScaleOut, int* modelScaleOut) {
+    *manufScaleOut = 1;
+    *modelScaleOut = 1;
+    if (!manuf[0] && !model[0]) return;
+
+    const int availW = headerMaxX - pad;
+    const int hCapSingle = (headerH - 8) / 7;
+    const int hCapDual = (headerH - 8 - 4) / 14;
+
+    if (manuf[0] && model[0]) {
+        int modelMaxW, manufMaxW;
+        bootHeaderWidthBudgets(availW, &modelMaxW, &manufMaxW);
+        const int maxModelW = bootHeaderMaxScaleForLine(model, modelMaxW);
+        const int maxManufW = bootHeaderMaxScaleForLine(manuf, manufMaxW);
+        const int hCap = hCapDual < hCapSingle ? hCapDual : hCapSingle;
+        int topModel = maxModelW;
+        if (hCap < topModel) topModel = hCap;
+
+        for (int modelS = topModel; modelS >= 2; modelS--) {
+            int manufS = modelS - 1;
+            if (manufS > maxManufW) manufS = maxManufW;
+            if (manufS >= 1 && manufS < modelS
+                && bootHeaderTextFits(headerH, manuf, model, manufS, modelS, manufMaxW, modelMaxW)) {
+                *manufScaleOut = manufS;
+                *modelScaleOut = modelS;
+                return;
+            }
+        }
+        if (bootHeaderTextFits(headerH, manuf, model, 1, 2, manufMaxW, modelMaxW)) {
+            *manufScaleOut = 1;
+            *modelScaleOut = 2;
+        }
+        return;
+    }
+
+    if (model[0]) {
+        const int maxW = bootHeaderMaxScaleForLine(model, availW);
+        int top = maxW;
+        if (hCapSingle < top) top = hCapSingle;
+        for (int s = top; s >= 1; s--) {
+            if (bootHeaderTextFits(headerH, manuf, model, 1, s, availW, availW)) {
+                *modelScaleOut = s;
+                return;
+            }
+        }
+        return;
+    }
+
+    const int maxW = bootHeaderMaxScaleForLine(manuf, availW);
+    int top = maxW;
+    if (hCapSingle < top) top = hCapSingle;
+    for (int s = top; s >= 1; s--) {
+        if (bootHeaderTextFits(headerH, manuf, model, s, 1, availW, availW)) {
+            *manufScaleOut = s;
+            return;
+        }
+    }
+}
+
+static bool bootLayoutFit(uint16_t w, uint16_t h, uint16_t h_full, int blockH, int pad, int qrModules, int* modulePxOut,
                           int* qrPxOut, bool* qrRightOut, int* qrXOut, int* qrYOut, int* availWOut,
                           int* textYOut, uint16_t maxTextW) {
     int textGap = pad;
@@ -275,7 +491,8 @@ static bool bootLayoutFit(uint16_t w, uint16_t h, int blockH, int pad, int qrMod
     int minDim = (int)((w < h) ? w : h);
     int moduleIdeal = (minDim - pad * 2) / qrModules;
     if (moduleIdeal < 1) moduleIdeal = 1;
-    if (moduleIdeal > 6) moduleIdeal = 6;
+    const int moduleMax = bootQrModuleMax(w, h_full);
+    if (moduleIdeal > moduleMax) moduleIdeal = moduleMax;
 
     for (modulePx = moduleIdeal; modulePx >= 1; modulePx--) {
         qrPx = modulePx * qrModules;
@@ -284,9 +501,11 @@ static bool bootLayoutFit(uint16_t w, uint16_t h, int blockH, int pad, int qrMod
             && (int)h >= pad * 2 + (blockH > qrPx ? blockH : qrPx)) {
             int availW = (int)w - pad * 2 - qrPx - sideGap;
             if ((int)maxTextW <= availW) {
+                int combinedH = (blockH > qrPx) ? blockH : qrPx;
+                int zoneY = ((int)h - combinedH) / 2;
                 int qrX = (int)w - pad - qrPx;
-                int qrY = pad;
-                int textY = pad;
+                int qrY = zoneY;
+                int textY = zoneY;
                 if (blockH < qrPx) textY += (qrPx - blockH) / 2;
                 else                qrY  += (blockH - qrPx) / 2;
                 *modulePxOut = modulePx;
@@ -300,13 +519,15 @@ static bool bootLayoutFit(uint16_t w, uint16_t h, int blockH, int pad, int qrMod
             }
         }
         if ((int)w >= pad * 2 + (int)maxTextW && (int)h >= pad * 2 + blockH + textGap + qrPx) {
+            int totalH = blockH + textGap + qrPx;
+            int zoneY = ((int)h - totalH) / 2;
             *modulePxOut = modulePx;
             *qrPxOut = qrPx;
             *qrRightOut = false;
             *qrXOut = ((int)w - qrPx) / 2;
-            *qrYOut = (int)h - pad - qrPx;
+            *qrYOut = zoneY + blockH + textGap;
             *availWOut = (int)w - pad * 2;
-            *textYOut = pad;
+            *textYOut = zoneY;
             return true;
         }
     }
@@ -341,6 +562,31 @@ static const uint8_t kSchemeWhiteValue[] = {
     0xFF,  // 7: COLOR_SCHEME_GRAY8  — 1bpp (default)
 };
 
+// Spectra 6 footer swatches: palette order black/white/yellow/red/blue/green →
+// firmware nibbles 0,1,2,3,5,6 (4 unused). Same as py-opendisplay BWGBRY_MAP.
+static const uint8_t kBwgbrySwatchCodes[] = {0, 1, 2, 3, 5, 6};
+
+// 4-gray dither level (0=black..3=white) -> stored 2-bit panel code (bb_epaper /
+// py-opendisplay get_gray4_codes). Boot 2bpp buffer inverts before plane split.
+static const uint8_t kGray4StoredBase[4] = {3, 1, 2, 0};
+static const uint8_t kGray4StoredV2[4]  = {3, 2, 1, 0};
+
+static bool bootGray4PanelUsesLutV2(uint16_t panelIc) {
+    return panelIc == 0x0028;  // EP426_800x480_4GRAY (u8Colors_4gray_v2)
+}
+
+static void bootGray4FillSwatchCodes(uint16_t panelIc, uint8_t out[4]) {
+    const uint8_t* stored = bootGray4PanelUsesLutV2(panelIc) ? kGray4StoredV2 : kGray4StoredBase;
+#if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
+    const bool direct2bpp = seeed_driver_used();
+#else
+    const bool direct2bpp = false;
+#endif
+    for (int level = 0; level < 4; level++) {
+        out[level] = direct2bpp ? (uint8_t)level : (uint8_t)((~stored[level]) & 3);
+    }
+}
+
 bool writeBootScreenWithQr() {
     const uint16_t w = globalConfig.displays[0].pixel_width;
     const uint16_t h = globalConfig.displays[0].pixel_height;
@@ -350,6 +596,7 @@ bool writeBootScreenWithQr() {
     const uint16_t h_log = is90or270 ? w : h;  // logical (user-visible) height
     // Three-zone layout (header 20% / middle 65% / footer 15%) on medium+ screens only
     const bool useZoneLayout = (w_log >= 400 && h_log >= 300);
+    const bool useHighResLayout = useZoneLayout && (w_log >= 600 && h_log >= 400);
     const int headerH  = useZoneLayout ? (int)h_log * 20 / 100 : 0;
     const int footerH  = useZoneLayout ? (int)h_log * 15 / 100 : 0;
     const int footerY0 = (int)h_log - footerH;
@@ -366,13 +613,20 @@ bool writeBootScreenWithQr() {
         : 0xFF;
 
     // Footer color swatches: one box per color the scheme can produce, 1px black border.
-    const int swatchY0 = footerY0 + 2;
+    const int footerPadTop = useZoneLayout ? 8 : 0;
+    int swatchY0 = 0;
     const int swatchY1 = (int)h_log;
-    const int swatchH  = swatchY1 - swatchY0;
+    int swatchH = 0;
+    int swatchW = 0;
+    char footerSchemeStr[16] = "";
+    char footerResStr[16] = "";
+    const char* footerSegs[6];
+    int footerSegX[6] = {0};
+    int numFooterSegs = 0;
     uint8_t swatchCode[16] = {0};
     bool    swatchIsColor[16] = {false};
     int     numSwatches = 0;
-    if (useZoneLayout && swatchH > 2) {
+    if (useZoneLayout && footerH > footerPadTop + 20) {
         switch (colorScheme) {
             case COLOR_SCHEME_MONO:
             case COLOR_SCHEME_GRAY8:
@@ -391,11 +645,11 @@ bool writeBootScreenWithQr() {
                 numSwatches = 4;
                 break;
             case COLOR_SCHEME_BWGBRY:
-                for (int i = 0; i < 6; i++) swatchCode[i] = (uint8_t)i;
+                for (int i = 0; i < 6; i++) swatchCode[i] = kBwgbrySwatchCodes[i];
                 numSwatches = 6;
                 break;
             case COLOR_SCHEME_GRAY4:
-                swatchCode[0] = 0; swatchCode[1] = 1; swatchCode[2] = 2; swatchCode[3] = 3;
+                bootGray4FillSwatchCodes(globalConfig.displays[0].panel_ic_type, swatchCode);
                 numSwatches = 4;
                 break;
             case COLOR_SCHEME_GRAY16:
@@ -406,7 +660,6 @@ bool writeBootScreenWithQr() {
                 break;
         }
     }
-    const int swatchW = (numSwatches > 0) ? ((int)w_log / numSwatches) : 0;
     const bool colorSwatchPlane1 = useBitplanes && numSwatches > 0;
 
     String chipId = getChipIdHex();
@@ -458,72 +711,163 @@ bool writeBootScreenWithQr() {
         snprintf(manufLine, sizeof(manufLine), "%s", (char*)globalConfig.data_extended.manufacturer_name);
         snprintf(modelLine, sizeof(modelLine), "%s", (char*)globalConfig.data_extended.model_name);
     }
-    const char* domainLine = "URL:  OPENDISPLAY.ORG";
+    const char* domainLine = useZoneLayout ? "URL:  OpenDisplay.org" : "OpenDisplay.org";
     char nameLine[32];
-    snprintf(nameLine, sizeof(nameLine), "ID:   OD%s", last6.c_str());
     char fwLine[32];
-    snprintf(fwLine, sizeof(fwLine), "FW:   OD ver %u.%u", (unsigned)getFirmwareMajor(), (unsigned)getFirmwareMinor());
-    char keyHex[33];
-    bytesToHex(&payload[5], 16, keyHex, sizeof(keyHex));
+    if (useZoneLayout) {
+        snprintf(nameLine, sizeof(nameLine), "ID:   OD%s", last6.c_str());
+        snprintf(fwLine, sizeof(fwLine), "FW:   OD ver %u.%u", (unsigned)getFirmwareMajor(), (unsigned)getFirmwareMinor());
+    } else {
+        snprintf(nameLine, sizeof(nameLine), "OD%s", last6.c_str());
+        snprintf(fwLine, sizeof(fwLine), "FW:O %u.%u", (unsigned)getFirmwareMajor(), (unsigned)getFirmwareMinor());
+    }
     char k1[24], k2[24];
-    snprintf(k1, sizeof(k1), "KEY1: %.16s", keyHex);
-    snprintf(k2, sizeof(k2), "KEY2: %.16s", keyHex + 16);
+    if (useZoneLayout) {
+        bootFormatKeyLine(k1, sizeof(k1), "KEY1:", securityConfig.encryption_key, 8);
+        bootFormatKeyLine(k2, sizeof(k2), "KEY2:", securityConfig.encryption_key + 8, 8);
+    } else {
+        char keyHex[33];
+        formatBootKeyDisplay(keyHex, sizeof(keyHex));
+        memcpy(k1, keyHex, 16);
+        k1[16] = '\0';
+        memcpy(k2, keyHex + 16, 16);
+        k2[16] = '\0';
+    }
 
-    int scaleText;
+    char vStr[8] = "";
+    char tStr[8] = "";
+    if (useZoneLayout) {
+        float batV = readBatteryVoltage();
+        float chipT = readChipTemperature();
+        if (batV >= 0.0f) snprintf(vStr, sizeof(vStr), "%.2fV", batV);
+        else snprintf(vStr, sizeof(vStr), "--V");
+        if (chipT > -900.0f) snprintf(tStr, sizeof(tStr), "%.1fC", chipT);
+        else snprintf(tStr, sizeof(tStr), "--C");
+    }
+
+    int middleScaleText;
     int pad;
+    int fwKey1Gap = 0;
     int modulePx;
     int qrPx;
     bool qrRight;
     int qrX, qrY, availW, textY;
+    const bool ultraHiResPanel = useZoneLayout && (w_log >= 1872 && h_log >= 1404);
     {
-        static const char* bootLines[] = {
-            manufLine, modelLine, domainLine, nameLine, fwLine, k1, k2,
+        const char* bootLinesFull[] = {
+            domainLine, nameLine, fwLine, k1, k2,
         };
+        const char* bootLinesReduced[] = {
+            domainLine, nameLine, fwLine, k1, k2,
+        };
+        const unsigned numBootLines = useZoneLayout ? 5u : 5u;
+        const char* const* bootLines = useZoneLayout ? bootLinesFull : bootLinesReduced;
         uint16_t maxTextW;
         bool layoutOk = false;
         int tryScale;
+        fwKey1Gap = 0;
 
-        for (tryScale = (w_log >= 600 && h_log >= 400) ? 6 : (w_log >= 400 && h_log >= 300) ? 2 : 1; tryScale >= 1 && !layoutOk; tryScale--) {
-            scaleText = tryScale;
-            pad = 6 * scaleText;
-            maxTextW = bootMaxTextWidth(bootLines, 7, scaleText);
-            int contentH = 6 * bootLineStep(scaleText) + 7 * scaleText;
-            layoutOk = bootLayoutFit(w_log, (uint16_t)middleH, contentH, pad, (int)qrModules, &modulePx, &qrPx, &qrRight, &qrX,
+        const int scaleHi = bootMiddleScaleHi(w_log, h_log, useHighResLayout);
+        for (tryScale = useZoneLayout ? scaleHi : 1; tryScale >= 1 && !layoutOk; tryScale--) {
+            middleScaleText = ultraHiResPanel ? (tryScale > 2 ? tryScale - 2 : 1) : tryScale;
+            pad = bootMiddlePad(middleScaleText, w_log, h_log, useZoneLayout);
+            fwKey1Gap = useZoneLayout ? middleScaleText * 6 : 0;
+            maxTextW = bootMaxTextWidth(bootLines, numBootLines, middleScaleText);
+            int contentH = useZoneLayout
+                ? (4 * bootLineStep(middleScaleText) + fwKey1Gap + 7 * middleScaleText)
+                : (((int)numBootLines - 1) * bootLineStep(middleScaleText) + 7 * middleScaleText);
+            layoutOk = bootLayoutFit(w_log, (uint16_t)middleH, h_log, contentH, pad, (int)qrModules, &modulePx, &qrPx, &qrRight, &qrX,
                                      &qrY, &availW, &textY, maxTextW);
         }
         if (!layoutOk) {
-            scaleText = 1;
-            pad = 6;
+            middleScaleText = 1;
+            pad = bootMiddlePad(middleScaleText, w_log, h_log, useZoneLayout);
+            fwKey1Gap = useZoneLayout ? middleScaleText * 6 : 0;
             modulePx = 1;
             qrPx = modulePx * (int)qrModules;
             qrRight = false;
             qrX = ((int)w_log - qrPx) / 2;
-            qrY = middleH - pad - qrPx;
-            if (qrY < pad) qrY = pad;
+            int contentH = useZoneLayout
+                ? (4 * bootLineStep(middleScaleText) + fwKey1Gap + 7 * middleScaleText)
+                : (((int)numBootLines - 1) * bootLineStep(middleScaleText) + 7 * middleScaleText);
+            int totalH = contentH + pad + qrPx;
+            int zoneY = (middleH - totalH) / 2;
+            if (zoneY < pad) zoneY = pad;
+            if (zoneY + totalH > middleH - pad) zoneY = middleH - pad - totalH;
+            if (zoneY < pad) zoneY = pad;
+            textY = zoneY;
+            qrY = zoneY + contentH + pad;
             availW = (int)w_log - pad * 2;
-            textY = pad;
         }
         // Translate layout coordinates into the middle zone
         qrY  += headerH;
         textY += headerH;
     }
 
+    const int middleFwKey1Gap = useZoneLayout ? middleScaleText * 6 : 0;
+
+    if (useZoneLayout && vStr[0] != '\0') {
+        footerSegs[numFooterSegs++] = vStr;
+        footerSegs[numFooterSegs++] = tStr;
+        if (useHighResLayout) {
+            formatBootColorSchemeText(colorScheme, footerSchemeStr, sizeof(footerSchemeStr));
+            footerSegs[numFooterSegs++] = footerSchemeStr;
+            if (globalConfig.displays[0].partial_update_support) {
+                footerSegs[numFooterSegs++] = "Partial support";
+            }
+            snprintf(footerResStr, sizeof(footerResStr), "%ux%u",
+                     (unsigned)w_log, (unsigned)h_log);
+            footerSegs[numFooterSegs++] = footerResStr;
+        }
+    }
+
+    const int contentRightX = (int)w_log - pad;
+
+    int footerInfoScale = 1;
+    int footerInfoH = 0;
+    const int footerTextY0 = footerY0 + footerPadTop;
+    const int footerBandLeft = pad;
+    const int footerBandRight = (int)w_log - pad;
+    const int footerBandW = footerBandRight - footerBandLeft;
+    if (numFooterSegs > 0) {
+        footerInfoScale = bootFooterInfoScale(middleScaleText, footerH, footerPadTop,
+                                            footerSegs, numFooterSegs, footerBandW);
+        footerInfoH = 7 * footerInfoScale + 4;
+        bootFooterLayoutSegs(footerSegs, numFooterSegs, footerInfoScale,
+                             footerBandLeft, footerBandRight, footerSegX);
+    }
+    swatchY0 = footerY0 + footerPadTop + footerInfoH;
+    const int footerTextBandH = swatchY0 - footerTextY0;
+    swatchH = swatchY1 - swatchY0;
+    if (numSwatches > 0 && swatchH > 2) {
+        swatchW = (int)w_log / numSwatches;
+    }
+
     int textOriginX = qrRight ? pad : ((int)w_log - availW) / 2;
     if (textOriginX < pad) textOriginX = pad;
-    int textMaxX = qrRight ? (qrX - pad) : (int)w_log;
-    int manufX = textOriginX;
-    int modelX = textOriginX;
+    int textMaxX = (int)w_log;
     int domX   = textOriginX;
     int nameX  = textOriginX;
     int fwX    = textOriginX;
     int k1X    = textOriginX;
     int k2X    = textOriginX;
 
+    int headerManufScale = 1;
+    int headerModelScale = 1;
+    int headerTextMaxX = (int)w_log - pad;
+    int headerManufMaxX = (int)w_log;
+    int headerModelMaxX = (int)w_log;
+    int manufX = pad;
+    int modelX = pad;
+    uint16_t manufY = 0;
+    uint16_t modelY = 0;
+
 #ifdef BOOT_HAS_LOGO
     const uint8_t* logoBmp;
-    int logoW, logoH, logoStride;
+    int logoW = 0, logoH = 0, logoStride = 0;
+    int logoX = pad;
+    int logoY = 8;
     if (useZoneLayout) {
-        // Pick the largest pre-scaled logo that fits within the header with 8px top/bottom padding
         const int maxLogoH = headerH - 16;
         int logoScale = (BOOT_LOGO_H_S3 <= maxLogoH) ? 3 : (BOOT_LOGO_H_S2 <= maxLogoH) ? 2 : 1;
         if (logoScale >= 3) {
@@ -536,10 +880,45 @@ bool writeBootScreenWithQr() {
             logoBmp = BOOT_LOGO_BITMAP_S1; logoW = BOOT_LOGO_W_S1;
             logoH = BOOT_LOGO_H_S1; logoStride = BOOT_LOGO_STRIDE_S1;
         }
+        logoX = contentRightX - logoW;
+        logoY = (headerH - logoH) / 2;
     }
-    int logoX = pad, logoY = 8;
 #endif
+    if (useZoneLayout && qrRight) {
+        const int qrDataRightPx = modulePx * ((int)qrSize + (int)quiet);
+        qrX = contentRightX - qrDataRightPx;
+        textMaxX = qrX - pad;
+    }
+    if (useZoneLayout) {
+#ifdef BOOT_HAS_LOGO
+        headerTextMaxX = logoX - pad;
+#endif
+        if (manufLine[0] || modelLine[0]) {
+            bootPickHeaderScales(headerH, headerTextMaxX, pad,
+                                 manufLine, modelLine, &headerManufScale, &headerModelScale);
+            const int headerAvailW = headerTextMaxX - pad;
+            headerManufMaxX = headerTextMaxX;
+            headerModelMaxX = headerTextMaxX;
+            if (manufLine[0] && modelLine[0]) {
+                int modelMaxW, manufMaxW;
+                bootHeaderWidthBudgets(headerAvailW, &modelMaxW, &manufMaxW);
+                headerManufMaxX = pad + manufMaxW;
+                headerModelMaxX = pad + modelMaxW;
+            }
+            const int headerGap = bootHeaderLineGap(headerManufScale, headerModelScale);
+            int headerBlockH = bootHeaderBlockH(manufLine, modelLine, headerManufScale, headerModelScale);
+            const int headerBlockY0 = (headerH - headerBlockH) / 2;
+            if (manufLine[0]) {
+                manufY = (uint16_t)headerBlockY0;
+                modelY = (uint16_t)(headerBlockY0 + 7 * headerManufScale + headerGap);
+            } else {
+                modelY = (uint16_t)headerBlockY0;
+            }
+        }
+    }
     int textStartY = textY;
+    const uint16_t footerInfoY = (uint16_t)(footerTextY0
+        + (footerTextBandH > footerInfoH ? (footerTextBandH - 7 * footerInfoScale) / 2 : 0));
 
     uint8_t* row = staticRowBuffer;
     // bb_epaper 4-gray (scheme 5) needs the packed 2bpp image split into two
@@ -566,14 +945,14 @@ bool writeBootScreenWithQr() {
         bbepSetAddrWindow(&bbep, 0, 0, w, h);
         bbepStartWrite(&bbep, targetPlane);
 #endif
-        const int ls = bootLineStep(scaleText);
-        const uint16_t manufY = (uint16_t)textStartY;
-        const uint16_t modelY = (uint16_t)(textStartY + ls);
-        const uint16_t domY   = (uint16_t)(textStartY + ls * 2);
-        const uint16_t nameY  = (uint16_t)(textStartY + ls * 3);
-        const uint16_t fwY    = (uint16_t)(textStartY + ls * 4);
-        const uint16_t k1Y    = (uint16_t)(textStartY + ls * 5);
-        const uint16_t k2Y    = (uint16_t)(textStartY + ls * 6);
+        const int ls = bootLineStep(middleScaleText);
+        const uint16_t domY  = (uint16_t)textStartY;
+        const uint16_t nameY = (uint16_t)(textStartY + ls);
+        const uint16_t fwY   = (uint16_t)(textStartY + ls * 2);
+        const uint16_t k1Y   = useZoneLayout
+            ? (uint16_t)(fwY + ls + middleFwKey1Gap)
+            : (uint16_t)(fwY + ls);
+        const uint16_t k2Y   = (uint16_t)(k1Y + ls);
         const bool colorPlanePass = colorSwatchPlane1 && pass == 1;
         for (uint16_t y_native = 0; y_native < h; y_native++) {
             memset(row, colorPlanePass ? 0x00 : whiteValue, pitch);
@@ -603,13 +982,15 @@ bool writeBootScreenWithQr() {
                     (useZoneLayout && (
                         ly == (uint16_t)headerH || ly == (uint16_t)(headerH + 1) ||
                         ly == (uint16_t)footerY0 || ly == (uint16_t)(footerY0 + 1))) ||
-                    bootTextPixelBlack(lx, ly, (uint16_t)manufX, manufY, manufLine,  (uint8_t)scaleText, w_log, textMaxX) ||
-                    bootTextPixelBlack(lx, ly, (uint16_t)modelX, modelY, modelLine,  (uint8_t)scaleText, w_log, textMaxX) ||
-                    bootTextPixelBlack(lx, ly, (uint16_t)domX,   domY,   domainLine, (uint8_t)scaleText, w_log, textMaxX) ||
-                    bootTextPixelBlack(lx, ly, (uint16_t)nameX,  nameY,  nameLine,   (uint8_t)scaleText, w_log, textMaxX) ||
-                    bootTextPixelBlack(lx, ly, (uint16_t)fwX,    fwY,    fwLine,     (uint8_t)scaleText, w_log, textMaxX) ||
-                    bootTextPixelBlack(lx, ly, (uint16_t)k1X,    k1Y,    k1,         (uint8_t)scaleText, w_log, textMaxX) ||
-                    bootTextPixelBlack(lx, ly, (uint16_t)k2X,    k2Y,    k2,         (uint8_t)scaleText, w_log, textMaxX) ||
+                    (useZoneLayout && manufLine[0] && bootTextPixelBlack(lx, ly, (uint16_t)manufX, manufY, manufLine, (uint8_t)headerManufScale, w_log, headerManufMaxX)) ||
+                    (useZoneLayout && modelLine[0] && bootTextPixelBlack(lx, ly, (uint16_t)modelX, modelY, modelLine, (uint8_t)headerModelScale, w_log, headerModelMaxX)) ||
+                    bootTextPixelBlack(lx, ly, (uint16_t)domX,   domY,   domainLine, (uint8_t)middleScaleText, w_log, textMaxX) ||
+                    bootTextPixelBlack(lx, ly, (uint16_t)nameX,  nameY,  nameLine,   (uint8_t)middleScaleText, w_log, textMaxX) ||
+                    bootTextPixelBlack(lx, ly, (uint16_t)fwX,    fwY,    fwLine,     (uint8_t)middleScaleText, w_log, textMaxX) ||
+                    (numFooterSegs > 0 && bootFooterTextPixelBlack(lx, ly, footerInfoY, footerSegs, footerSegX,
+                        numFooterSegs, (uint8_t)footerInfoScale, w_log, footerBandRight)) ||
+                    bootTextPixelBlack(lx, ly, (uint16_t)k1X,    k1Y,    k1,         (uint8_t)middleScaleText, w_log, textMaxX) ||
+                    bootTextPixelBlack(lx, ly, (uint16_t)k2X,    k2Y,    k2,         (uint8_t)middleScaleText, w_log, textMaxX) ||
                     bootQrPixelBlack(lx, ly, qrX, qrY, qrPx, modulePx, quiet, qrSize, &qr)
 #ifdef BOOT_HAS_LOGO
                     || (useZoneLayout && bootLogoPixelBlack(lx, ly, logoX, logoY, logoBmp, logoW, logoH, logoStride, (int)w_log))

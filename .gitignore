@@ -79,6 +79,9 @@ dkms.conf
 .pio
 .vscode
 platformio.local.ini
+src/generated/
+__pycache__/
+*.py[cod]
 
 ### Other files
 .idea
