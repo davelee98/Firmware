@@ -1165,6 +1165,7 @@ void initDisplay(){
             bool bootOk = refreshBootScreenFull();
             if (!bootOk && !nrfVbusPresent()) {
                 writeSerial("Boot refresh failed on battery — re-powering panel and retrying", true);
+                touchResumeAfterEpdRefresh();
                 pwrmgm(false);
                 delay(200);
                 prepareEpdRailForBoot();
@@ -1392,6 +1393,8 @@ static void streamGray4Bytes(const uint8_t* buf, uint32_t len) {
     }
 }
 
+static bool directWriteTouchSuspended = false;
+
 void cleanupDirectWriteState(bool refreshDisplay) {
     directWriteActive = false;
     directWriteCompressed = false;
@@ -1418,6 +1421,10 @@ void cleanupDirectWriteState(bool refreshDisplay) {
     }
     displayPowerState = false;
     pwrmgm(false);
+    if (directWriteTouchSuspended) {
+        touchResumeAfterEpdRefresh();
+        directWriteTouchSuspended = false;
+    }
 }
 
 void handleDirectWriteStart(uint8_t* data, uint16_t len) {
@@ -1426,6 +1433,7 @@ if (partialCtx.active) cleanup_partial_write_state();
         cleanupDirectWriteState(false);
     }
     touchSuspendForEpdRefresh();
+    directWriteTouchSuspended = true;
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
     if (seeed_driver_used()) {
         seeed_gfx_prepare_hardware();
@@ -1454,7 +1462,6 @@ if (partialCtx.active) cleanup_partial_write_state();
         memcpy(&directWriteDecompressedTotal, data, 4);
         if (directWriteDecompressedTotal != directWriteTotalBytes) {
             cleanupDirectWriteState(false);
-            touchResumeAfterEpdRefresh();
             uint8_t errorResponse[] = {0xFF, 0xFF};
             sendResponse(errorResponse, sizeof(errorResponse));
             return;
@@ -1673,7 +1680,6 @@ void handleDirectWriteEnd(uint8_t* data, uint16_t len) {
         // arrived before refreshing stale RAM or committing an etag.
         if (directWriteBytesWritten != directWriteTotalBytes) {
             cleanupDirectWriteState(false);
-            touchResumeAfterEpdRefresh();
             uint8_t errorResponse[] = {0xFF, 0x72};
             sendResponse(errorResponse, sizeof(errorResponse));
             return;
@@ -1716,7 +1722,6 @@ void handleDirectWriteEnd(uint8_t* data, uint16_t len) {
     epdRefreshInProgress = false;
     delay(50);
     cleanupDirectWriteState(false);
-    touchResumeAfterEpdRefresh();
 #ifdef TARGET_ESP32
     esp32_restart_ble_advertising();
 #endif
