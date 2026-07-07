@@ -19,6 +19,27 @@
 static HardwareSerial LogSerialPort(1);
 #endif
 
+#ifdef TARGET_ESP32
+// Distinguishes a hidden mid-cycle reset (PANIC/WDT/BROWNOUT/SW) from a real
+// power-on or deep-sleep wake; any reset here clears the wake cause, so the
+// next boot takes the NORMAL BOOT branch and redraws the boot screen.
+static const char* resetReasonName(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_POWERON:   return "POWERON";
+        case ESP_RST_EXT:       return "EXT";
+        case ESP_RST_SW:        return "SW";
+        case ESP_RST_PANIC:     return "PANIC";
+        case ESP_RST_INT_WDT:   return "INT_WDT";
+        case ESP_RST_TASK_WDT:  return "TASK_WDT";
+        case ESP_RST_WDT:       return "WDT";
+        case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+        case ESP_RST_BROWNOUT:  return "BROWNOUT";
+        case ESP_RST_SDIO:      return "SDIO";
+        default:                return "UNKNOWN";
+    }
+}
+#endif
+
 void setup() {
     #if defined(TARGET_ESP32) && defined(OPENDISPLAY_LOG_UART)
     LogSerialPort.begin(115200, SERIAL_8N1, OPENDISPLAY_LOG_UART_RX, OPENDISPLAY_LOG_UART_TX);
@@ -40,6 +61,8 @@ void setup() {
         writeSerial("Git SHA: (not set)");
     }
     #ifdef TARGET_ESP32
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+    writeSerial("Reset reason: " + String(resetReasonName(reset_reason)) + " (" + String((int)reset_reason) + ")");
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
     bool is_deep_sleep_wake = (wakeup_reason != ESP_SLEEP_WAKEUP_UNDEFINED);
     if (is_deep_sleep_wake) {
@@ -53,6 +76,9 @@ void setup() {
     } else {
         woke_from_deep_sleep = false;
         writeSerial("=== NORMAL BOOT ===");
+        // RTC memory survives soft resets (panic/WDT/esp_restart) but not power
+        // loss: a non-zero count on a NORMAL BOOT means a hidden mid-cycle reset.
+        writeSerial("Deep sleep count (RTC): " + String(deep_sleep_count));
     }
     #endif
     writeSerial("Starting setup...");
