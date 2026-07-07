@@ -31,7 +31,64 @@ panics, `esp_restart()`, and brownout resets — only true power loss clears it.
 "wake detected correctly + boot screen later" is fully self-consistent with a
 mid-cycle crash.
 
-## Reset sources found in the wake cycle (ranked)
+## UPDATE 2026-07-07 (evening): confirmed by device log — it is a PANIC
+
+Serial capture from the device (Seeed reTerminal E1001, ESP32-S3, bb_epaper
+panel IC 0x3b, no power latch, `power_mode=1`, `deep_sleep_time=180s`):
+
+```
+rst:0x5 (DSLEEP) ... Reset reason: DEEPSLEEP (8)
+=== WOKE FROM DEEP SLEEP ===   Wake-up reason: 4 (TIMER)   Deep sleep count: 2
+=== Minimal Setup (Deep Sleep Wake) ===
+... full config summary ...  Encryption session cleared
+rst:0xc (RTC_SW_CPU_RST)  Saved PC:0x403830d1 ... Reset reason: PANIC (4)
+=== NORMAL BOOT ===   Deep sleep count (RTC): 0
+... boot screen redraws ...
+```
+
+**Confirmed:** the boot-screen reload is a **PANIC that fires inside
+`minimalSetup()` on the deep-sleep wake path, before BLE advertising and
+before any client connection.** The subsequent `RTC_SW_CPU_RST` is a software
+reset (panic reboot), which clears the wake cause -> next boot takes the
+`NORMAL BOOT` branch -> `initDisplay()` -> boot screen. RTC survived
+(consistent with a soft reset, not power loss).
+
+Crash PC `0x403830d1` decodes (xtensa-esp32s3 addr2line, IRAM address stable
+across all S3 builds) to FreeRTOS **`prvCopyDataToQueue`** — i.e. a fault
+inside `xQueueGenericSend`, meaning a driver was invoked with a bad /
+uninstalled queue handle.
+
+### This DISPROVES the ranked hypotheses below
+
+Sources #1, #2, #3, #5 all require an active/last BLE connection or a
+command; the crash happens in `minimalSetup()` *before* BLE is even
+initialized, so those are not the cause of this failure. They remain valid
+latent robustness issues but are not this bug. The real fault is a queue-send
+crash during the wake-path init sequence (`full_config_init` ->
+`initio` -> `ble_init_esp32(true)`).
+
+### Why the exact call is not yet visible
+
+The device logs over `OPENDISPLAY_LOG_UART` (UART1). The IDF panic handler
+only flushes the **console** UART (UART0/USB), so the last buffered lines on
+UART1 before the panic are lost — every capture truncates at
+`Encryption session cleared` (inside `full_config_init`), which is *not*
+necessarily where it died.
+
+### Diagnostic added (commit b6f1da9)
+
+`flushLog()` (blocks until the log UART physically drains) plus flushed
+bracket markers around the three `minimalSetup` stages and `initio`'s
+internal stages (`[wake] >> ...`, `[initio] >> ...`). The next capture's
+last `>>` marker names the faulting call directly. **Next step: flash,
+trigger one wake cycle, capture the log, read the last marker.**
+
+Note (reasoning): `initDisplay()` runs *after* `initio()` on normal boot, and
+the boot screen visibly redraws — so `initio()` itself likely survives, which
+points at `ble_init_esp32(true)` (heavy FreeRTOS-queue user). The markers will
+confirm or refute this.
+
+## Reset sources found in the wake cycle (ranked — see UPDATE above; #1/#2/#3/#5 disproven for THIS log)
 
 ### 1. `BLEDevice::deinit(true)` while a client is connected — `main.cpp:296`
 
