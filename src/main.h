@@ -295,6 +295,25 @@ uint32_t displayed_etag = 0;
 RTC_DATA_ATTR bool woke_from_deep_sleep = false;
 RTC_DATA_ATTR uint32_t deep_sleep_count = 0;
 
+// Coarse execution-phase heartbeat for post-mortem crash diagnosis. Updated at
+// key transitions; the value survives soft resets (PANIC/WDT/BROWNOUT/esp_restart)
+// but NOT a true power-cycle. On the next boot, the reset reason plus the last
+// phase recorded here localizes where a crash happened (e.g. the confirmed
+// wake-path PANIC). A pure hang recovered by removing power clears RTC and loses
+// this — see the caveat in the crash-diagnosis notes.
+enum RtcPhase {
+    RTC_PHASE_UNKNOWN = 0,
+    RTC_PHASE_SETUP = 1,             // normal-boot setup()
+    RTC_PHASE_MINIMAL_SETUP = 2,     // deep-sleep-wake minimalSetup() (confirmed panic window)
+    RTC_PHASE_WAKE_ADVERTISING = 3,  // wake-mode advertising, waiting for a connection
+    RTC_PHASE_IDLE = 4,              // loop idle (no BLE/WiFi activity)
+    RTC_PHASE_BLE_ACTIVE = 5,        // loop with BLE/WiFi work in flight
+    RTC_PHASE_EPD_REFRESH = 6,       // an EPD refresh is in progress
+    RTC_PHASE_DEEP_SLEEP_ENTRY = 7,  // committing to deep sleep
+};
+RTC_DATA_ATTR uint32_t rtc_last_uptime_ms = 0;  // millis() at the last heartbeat
+RTC_DATA_ATTR uint8_t  rtc_last_phase = RTC_PHASE_UNKNOWN;
+
 // Advertising timeout state variables
 bool advertising_timeout_active = false;
 uint32_t advertising_start_time = 0;

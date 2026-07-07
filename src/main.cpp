@@ -38,6 +38,28 @@ static const char* resetReasonName(esp_reset_reason_t reason) {
         default:                return "UNKNOWN";
     }
 }
+
+// Human-readable name for the RTC execution-phase heartbeat (see RtcPhase).
+static const char* rtcPhaseName(uint8_t phase) {
+    switch (phase) {
+        case RTC_PHASE_SETUP:            return "SETUP";
+        case RTC_PHASE_MINIMAL_SETUP:    return "MINIMAL_SETUP";
+        case RTC_PHASE_WAKE_ADVERTISING: return "WAKE_ADVERTISING";
+        case RTC_PHASE_IDLE:             return "IDLE";
+        case RTC_PHASE_BLE_ACTIVE:       return "BLE_ACTIVE";
+        case RTC_PHASE_EPD_REFRESH:      return "EPD_REFRESH";
+        case RTC_PHASE_DEEP_SLEEP_ENTRY: return "DEEP_SLEEP_ENTRY";
+        default:                         return "UNKNOWN";
+    }
+}
+
+// Record the current execution phase to RTC memory. Cheap (two RTC-RAM writes),
+// safe to call every loop iteration. Read back on the next boot to see where a
+// crash struck.
+void rtcHeartbeat(uint8_t phase) {
+    rtc_last_phase = phase;
+    rtc_last_uptime_ms = millis();
+}
 #endif
 
 void setup() {
@@ -63,6 +85,11 @@ void setup() {
     #ifdef TARGET_ESP32
     esp_reset_reason_t reset_reason = esp_reset_reason();
     writeSerial("Reset reason: " + String(resetReasonName(reset_reason)) + " (" + String((int)reset_reason) + ")");
+    // Last execution phase recorded before this reset (survives soft resets, not
+    // power loss). Combined with the reset reason above, this localizes crashes.
+    writeSerial("Last phase before reset: " + String(rtcPhaseName(rtc_last_phase)) +
+                " (" + String((int)rtc_last_phase) + ") at uptime " + String(rtc_last_uptime_ms) + " ms");
+    rtcHeartbeat(RTC_PHASE_SETUP);
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
     bool is_deep_sleep_wake = (wakeup_reason != ESP_SLEEP_WAKEUP_UNDEFINED);
     if (is_deep_sleep_wake) {
@@ -126,6 +153,17 @@ void loop() {
             advertising_timeout_active = false;
             enterDeepSleep();
             return;
+        }
+        rtcHeartbeat(RTC_PHASE_WAKE_ADVERTISING);
+        // Progress log for the otherwise-silent wake advertising window, so a
+        // stuck-but-not-yet-timed-out state is visible on the log.
+        static uint32_t lastWakeAdvLog = 0;
+        if (millis() - lastWakeAdvLog >= 2000) {
+            lastWakeAdvLog = millis();
+            writeSerial("[wake] advertising " + String(advertising_duration) + "/" +
+                        String(advertising_timeout_ms) + " ms, conns=" +
+                        String(pServer ? pServer->getConnectedCount() : 0) +
+                        " subscribed=" + String(esp32BleNotifySubscribed ? 1 : 0));
         }
         delay(50);
         return;
@@ -199,10 +237,12 @@ void loop() {
                      epdRefreshInProgress ||
                      wifiLanSession;
     if (bleActive) {
+        rtcHeartbeat(epdRefreshInProgress ? RTC_PHASE_EPD_REFRESH : RTC_PHASE_BLE_ACTIVE);
         processButtonEvents();
         processTouchInput();
         delay(1);
     } else {
+        rtcHeartbeat(RTC_PHASE_IDLE);
         if (!woke_from_deep_sleep && deep_sleep_count == 0 && globalConfig.power_option.power_mode == 1) {
             if (!firstBootDelayInitialized) {
                 firstBootDelayInitialized = true;
@@ -269,6 +309,7 @@ void idleDelay(uint32_t delayMs) {
 
 #ifdef TARGET_ESP32
 void minimalSetup() {
+    rtcHeartbeat(RTC_PHASE_MINIMAL_SETUP);
     writeSerial("=== Minimal Setup (Deep Sleep Wake) ===");
     writeSerial("[wake] >> full_config_init"); flushLog();
     full_config_init();
@@ -278,7 +319,12 @@ void minimalSetup() {
     ble_init_esp32(true); // Update manufacturer data
     writeSerial("[wake] << ble_init_esp32"); flushLog();
     writeSerial("=== BLE advertising started (minimal mode) ===");
-    writeSerial("Advertising for 10 seconds, waiting for connection...");
+    // The wake-mode advertising window is sleep_timeout_ms (falling back to 10 s
+    // when unset), NOT a fixed 10 s — log the value actually in effect so a
+    // misconfigured short window is visible instead of assumed.
+    uint32_t adv_window_ms = globalConfig.power_option.sleep_timeout_ms;
+    if (adv_window_ms == 0) adv_window_ms = 10000;
+    writeSerial("Advertising for " + String(adv_window_ms) + " ms, waiting for connection...");
     advertising_timeout_active = true;
     advertising_start_time = millis();
 }
@@ -314,6 +360,7 @@ void enterDeepSleep() {
         return;
     }
     writeSerial("Entering deep sleep for " + String(globalConfig.power_option.deep_sleep_time_seconds) + " seconds");
+    rtcHeartbeat(RTC_PHASE_DEEP_SLEEP_ENTRY);
     woke_from_deep_sleep = true; // Will be true on next boot
     if (pServer != nullptr) {
         BLEAdvertising *pAdvertising = pServer->getAdvertising();

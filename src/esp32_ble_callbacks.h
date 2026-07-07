@@ -35,10 +35,29 @@ void touchResumeAfterEpdRefresh(void);
 extern volatile bool epdRefreshInProgress;
 extern bool directWriteActive;
 
+#ifndef RESPONSE_QUEUE_SIZE
+#define RESPONSE_QUEUE_SIZE 10
+#endif
+extern uint8_t responseQueueHead;
+extern uint8_t responseQueueTail;
+
+// Ring-buffer fill depths. A non-zero depth at connect time means responses or
+// commands were carried across a disconnect (they are never flushed on
+// disconnect) — the mechanism behind the stale "00 71" ACK burst a fresh client
+// receives on reconnect.
+static inline uint8_t bleCmdQueueDepth() {
+    return (uint8_t)((commandQueueHead - commandQueueTail + COMMAND_QUEUE_SIZE) % COMMAND_QUEUE_SIZE);
+}
+static inline uint8_t bleRespQueueDepth() {
+    return (uint8_t)((responseQueueHead - responseQueueTail + RESPONSE_QUEUE_SIZE) % RESPONSE_QUEUE_SIZE);
+}
+
 class MyBLEServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
-        (void)pServer;
         writeSerial("=== BLE CLIENT CONNECTED (ESP32) ===");
+        writeSerial("[ble] connect: conns=" + String(pServer ? pServer->getConnectedCount() : 0) +
+                    " cmdQ=" + String(bleCmdQueueDepth()) +
+                    " respQ=" + String(bleRespQueueDepth()) + " (non-zero == stale from prior session)");
         rebootFlag = 0;
         esp32BleNotifySubscribed = false;
         updatemsdata();
@@ -46,6 +65,10 @@ class MyBLEServerCallbacks : public BLEServerCallbacks {
     void onDisconnect(BLEServer* pServer) {
         (void)pServer;
         writeSerial("=== BLE CLIENT DISCONNECTED (ESP32) ===");
+        writeSerial("[ble] disconnect: cmdQ=" + String(bleCmdQueueDepth()) +
+                    " respQ=" + String(bleRespQueueDepth()) +
+                    String(directWriteActive ? " directWriteActive" : "") +
+                    String(epdRefreshInProgress ? " epdRefreshInProgress" : ""));
         esp32BleNotifySubscribed = false;
         if (epdRefreshInProgress) {
             writeSerial("EPD refresh in progress — deferring cleanup/advertising to main loop");
@@ -63,7 +86,8 @@ public:
         (void)pCharacteristic;
         (void)desc;
         esp32BleNotifySubscribed = (subValue & 0x0001) != 0;
-        writeSerial("BLE notify subscription: " + String(esp32BleNotifySubscribed ? "enabled" : "disabled"));
+        writeSerial("BLE notify subscription: " + String(esp32BleNotifySubscribed ? "enabled" : "disabled") +
+                    " (respQ=" + String(bleRespQueueDepth()) + " pending, flushed once enabled)");
     }
 #endif
     void onWrite(BLECharacteristic* pCharacteristic) {

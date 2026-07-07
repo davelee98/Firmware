@@ -24,12 +24,14 @@ void writeSerial(String message, bool newLine = true);
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLEAdvertising.h>
+#include <esp_system.h>   // esp_get_free_heap_size (BLE init heap diagnostics)
 #if defined(CONFIG_BLUEDROID_ENABLED)
 #include <BLE2902.h>
 #endif
 
 String getChipIdHex();
 void writeSerial(String message, bool newLine = true);
+void flushLog();
 #include "esp32_ble_callbacks.h"
 
 extern struct GlobalConfig globalConfig;
@@ -164,6 +166,7 @@ bool esp32_ble_notify_enabled(void) {
 
 void esp32_restart_ble_advertising(void) {
     if (pServer == nullptr) {
+        writeSerial("[ble] advertising restart deferred: no server (pServer==null)");
         bleRestartAdvertisingPending = true;
         return;
     }
@@ -172,6 +175,7 @@ void esp32_restart_ble_advertising(void) {
         return;
     }
     if (epdRefreshInProgress) {
+        writeSerial("[ble] advertising restart deferred: EPD refresh in progress");
         bleRestartAdvertisingPending = true;
         return;
     }
@@ -191,11 +195,25 @@ void ble_init_esp32(bool update_manufacturer_data) {
     }
 #endif
     writeSerial("=== Initializing ESP32 BLE ===");
+#if defined(CONFIG_NIMBLE_ENABLED)
+    writeSerial("[ble] stack: NimBLE");
+#else
+    writeSerial("[ble] stack: Bluedroid");
+#endif
     String deviceName = "OD" + getChipIdHex();
     writeSerial("Device name will be: " + deviceName);
+    // Flushed sub-step markers: minimalSetup()'s markers only bracket this whole
+    // function as a unit, but the confirmed wake-path PANIC (crash PC in FreeRTOS
+    // prvCopyDataToQueue) is suspected inside here. These name the exact failing
+    // call on the next crash capture. Heap is logged around init to catch a
+    // controller-memory allocation failure after a deep-sleep deinit/reinit cycle.
+    writeSerial("[ble] heap before init: " + String(esp_get_free_heap_size())); flushLog();
+    writeSerial("[ble] >> BLEDevice::init"); flushLog();
     BLEDevice::init(deviceName.c_str());
+    writeSerial("[ble] << BLEDevice::init  heap after: " + String(esp_get_free_heap_size())); flushLog();
     writeSerial("Setting BLE MTU to 512...");
     BLEDevice::setMTU(512);
+    writeSerial("[ble] >> createServer"); flushLog();
     pServer = BLEDevice::createServer();
     if (pServer == nullptr) {
         writeSerial("ERROR: Failed to create BLE server");
@@ -204,6 +222,7 @@ void ble_init_esp32(bool update_manufacturer_data) {
     pServer->setCallbacks(&staticServerCallbacks);
     writeSerial("Server callbacks configured");
     BLEUUID serviceUUID("00002446-0000-1000-8000-00805F9B34FB");
+    writeSerial("[ble] >> createService"); flushLog();
     pService = pServer->createService(serviceUUID);
     if (pService == nullptr) {
         writeSerial("ERROR: Failed to create BLE service");
@@ -211,6 +230,7 @@ void ble_init_esp32(bool update_manufacturer_data) {
     }
     writeSerial("BLE service 0x2446 created successfully");
     BLEUUID charUUID("00002446-0000-1000-8000-00805F9B34FB");
+    writeSerial("[ble] >> createCharacteristic"); flushLog();
     pTxCharacteristic = pService->createCharacteristic(
         charUUID,
         BLECharacteristic::PROPERTY_READ |
@@ -230,6 +250,7 @@ void ble_init_esp32(bool update_manufacturer_data) {
 #endif
     pTxCharacteristic->setCallbacks(&staticCharCallbacks);
     pRxCharacteristic = pTxCharacteristic;
+    writeSerial("[ble] >> pService->start"); flushLog();
     pService->start();
     BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
     if (pAdvertising == nullptr) {
@@ -242,7 +263,9 @@ void ble_init_esp32(bool update_manufacturer_data) {
     advertisementData->setFlags(0x06);
     writeSerial("Device name added to advertising");
     if (update_manufacturer_data) {
+        writeSerial("[ble] >> updatemsdata"); flushLog();
         updatemsdata();
+        writeSerial("[ble] << updatemsdata"); flushLog();
     }
     pAdvertising->setAdvertisementData(*advertisementData);
     pAdvertising->setScanResponse(false);
@@ -251,8 +274,9 @@ void ble_init_esp32(bool update_manufacturer_data) {
     writeSerial("Advertising intervals set");
     pServer->getAdvertising()->setMinPreferred(0x06);
     pServer->getAdvertising()->setMaxPreferred(0x12);
+    writeSerial("[ble] >> advertising start"); flushLog();
     pServer->getAdvertising()->start();
-    writeSerial("=== BLE advertising started successfully ===");
+    writeSerial("=== BLE advertising started successfully ==="); flushLog();
     writeSerial("Device ready: " + deviceName);
     writeSerial("Waiting for BLE connections...");
 }
