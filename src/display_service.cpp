@@ -1361,6 +1361,16 @@ void updatemsdata(){
                 pAdvertising->setMaxPreferred(0x12);
                 delay(50);
                 pAdvertising->start();
+                // Each MSD refresh stops and restarts advertising (a ~50 ms gap).
+                // Throttled so it documents advertising downtime without flooding
+                // the log — if this line appears on nearly every call, the mfg-data
+                // dedup above is not firing (mloopcounter changes the payload every
+                // time), which is itself worth seeing.
+                static uint32_t lastMsdAdvLog = 0;
+                if (millis() - lastMsdAdvLog >= 3000) {
+                    lastMsdAdvLog = millis();
+                    writeSerial("[msd] advertising restarted with new manufacturer data", true);
+                }
             }
         }
     }
