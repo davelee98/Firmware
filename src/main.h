@@ -345,8 +345,9 @@ BLECharacteristic imageCharacteristic("2446", BLEWrite | BLEWriteWithoutResponse
 // Define queue sizes and structures first
 #define RESPONSE_QUEUE_SIZE 10
 #define MAX_RESPONSE_SIZE 512
-#define COMMAND_QUEUE_SIZE 5
+#define COMMAND_QUEUE_SIZE 16
 #define MAX_COMMAND_SIZE 512
+#define CMD_QUEUE_PUSH_TIMEOUT_MS 100
 
 struct ResponseQueueItem {
     uint8_t data[MAX_RESPONSE_SIZE];
@@ -360,9 +361,9 @@ uint8_t responseQueueTail = 0;
 
 #include "esp32_ble_callbacks.h"
 
-CommandQueueItem commandQueue[COMMAND_QUEUE_SIZE];
-volatile uint8_t commandQueueHead = 0;
-volatile uint8_t commandQueueTail = 0;
+QueueHandle_t cmdQueue = nullptr;
+static uint8_t cmdQueueStorage[COMMAND_QUEUE_SIZE * sizeof(CommandQueueItem)];
+static StaticQueue_t cmdQueueControl;
 
 BLEServer* pServer = nullptr;
 BLEService* pService = nullptr;

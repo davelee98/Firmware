@@ -42,6 +42,10 @@ void setup() {
     #ifdef TARGET_ESP32
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
     bool is_deep_sleep_wake = (wakeup_reason != ESP_SLEEP_WAKEUP_UNDEFINED);
+    // Create the command queue before any BLE path starts (normal boot's
+    // ble_init() below, or the deep-sleep-wake minimalSetup()->ble_init_esp32()),
+    // so onWrite can never fire before the queue exists.
+    cmdQueue = xQueueCreateStatic(COMMAND_QUEUE_SIZE, sizeof(CommandQueueItem), cmdQueueStorage, &cmdQueueControl);
     if (is_deep_sleep_wake) {
         woke_from_deep_sleep = true;
         deep_sleep_count++;
@@ -104,11 +108,10 @@ void loop() {
         delay(50);
         return;
     }
-    if (commandQueueTail != commandQueueHead) {
-        writeSerial("ESP32: Processing queued command (" + String(commandQueue[commandQueueTail].len) + " bytes)");
-        imageDataWritten(NULL, NULL, commandQueue[commandQueueTail].data, commandQueue[commandQueueTail].len);
-        commandQueue[commandQueueTail].pending = false;
-        commandQueueTail = (commandQueueTail + 1) % COMMAND_QUEUE_SIZE;
+    CommandQueueItem cmdItem;
+    if (cmdQueuePop(&cmdItem)) {
+        writeSerial("ESP32: Processing queued command (" + String(cmdItem.len) + " bytes)");
+        imageDataWritten(NULL, NULL, cmdItem.data, cmdItem.len);
         writeSerial("Command processed");
     }
     if (responseQueueTail != responseQueueHead) {
@@ -166,7 +169,7 @@ void loop() {
     #else
     const bool wifiLanSession = false;
     #endif
-    bool bleActive = (commandQueueTail != commandQueueHead) ||
+    bool bleActive = cmdQueueHasItems() ||
                      (responseQueueTail != responseQueueHead) ||
                      (pServer && pServer->getConnectedCount() > 0) ||
                      bleRestartAdvertisingPending ||

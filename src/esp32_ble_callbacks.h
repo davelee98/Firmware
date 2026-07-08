@@ -9,12 +9,17 @@
 #include <BLEServer.h>
 #include <string.h>
 #include "ble_init.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
 #ifndef COMMAND_QUEUE_SIZE
-#define COMMAND_QUEUE_SIZE 5
+#define COMMAND_QUEUE_SIZE 16
 #endif
 #ifndef MAX_COMMAND_SIZE
 #define MAX_COMMAND_SIZE 512
+#endif
+#ifndef CMD_QUEUE_PUSH_TIMEOUT_MS
+#define CMD_QUEUE_PUSH_TIMEOUT_MS 100
 #endif
 
 struct CommandQueueItem {
@@ -23,9 +28,21 @@ struct CommandQueueItem {
     bool pending;
 };
 
-extern CommandQueueItem commandQueue[COMMAND_QUEUE_SIZE];
-extern volatile uint8_t commandQueueHead;
-extern volatile uint8_t commandQueueTail;
+extern QueueHandle_t cmdQueue;
+static inline bool cmdQueuePush(const uint8_t* data, uint16_t len) {
+    if (!cmdQueue || len == 0 || len > MAX_COMMAND_SIZE) return false;
+    CommandQueueItem item;
+    memcpy(item.data, data, len);
+    item.len = len;
+    item.pending = true;  // vestigial, kept for struct compatibility
+    return xQueueSend(cmdQueue, &item, pdMS_TO_TICKS(CMD_QUEUE_PUSH_TIMEOUT_MS)) == pdTRUE;
+}
+static inline bool cmdQueuePop(CommandQueueItem* out) {
+    return cmdQueue && xQueueReceive(cmdQueue, out, 0) == pdTRUE;
+}
+static inline bool cmdQueueHasItems() {
+    return cmdQueue && uxQueueMessagesWaiting(cmdQueue) > 0;
+}
 extern uint8_t rebootFlag;
 extern volatile bool esp32BleNotifySubscribed;
 
@@ -79,16 +96,10 @@ public:
                 hexDump += String(data[i], HEX) + " ";
             }
             writeSerial(hexDump);
-            uint8_t nextHead = (commandQueueHead + 1) % COMMAND_QUEUE_SIZE;
-            if (nextHead != commandQueueTail) {
-                memcpy(commandQueue[commandQueueHead].data, data, len);
-                commandQueue[commandQueueHead].len = len;
-                commandQueue[commandQueueHead].pending = true;
-                commandQueueHead = nextHead;
+            if (cmdQueuePush(data, len))
                 writeSerial("ESP32: Command queued for processing");
-            } else {
+            else
                 writeSerial("ERROR: Command queue full, dropping command");
-            }
         } else if (value.length() > MAX_COMMAND_SIZE) {
             writeSerial("WARNING: Command too large, dropping");
         } else {
