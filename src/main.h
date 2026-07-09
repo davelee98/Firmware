@@ -122,7 +122,13 @@ void bbepWriteData(BBEPDISP *pBBEP, uint8_t *pData, int iLen);
 
 uint8_t decompressionChunk[OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE];
 uint8_t bleResponseBuffer[94];
+#ifdef TARGET_ESP32
+// Rolling MSD sequence nibble; persists across deep sleep so advertisements
+// stay distinguishable across sleep/wake cycles.
+RTC_DATA_ATTR uint8_t mloopcounter = 0;
+#else
 uint8_t mloopcounter = 0;
+#endif
 uint8_t rebootFlag = 1;  // Set to 1 after reboot, cleared to 0 after BLE connection
 uint8_t connectionRequested = 0;  // Reserved for future features (connection requested flag)
 uint8_t dynamicreturndata[11] = {0};  // Dynamic return data blocks (bytes 2-12 in advertising payload)

@@ -279,8 +279,7 @@ void minimalSetup() {
     writeSerial("[wake] << initio >> ble_init_esp32"); flushLog();
     ble_init_esp32(true); // Update manufacturer data
     writeSerial("[wake] << ble_init_esp32"); flushLog();
-    writeSerial("=== BLE advertising started (minimal mode) ===");
-    writeSerial("Advertising for 10 seconds, waiting for connection...");
+    writeSerial("Advertising for " + String(globalConfig.power_option.sleep_timeout_ms) + " ms (sleep_timeout_ms), waiting for connection...");
     advertising_timeout_active = true;
     advertising_start_time = millis();
 }
