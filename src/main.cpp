@@ -138,6 +138,11 @@ void loop() {
             woke_from_deep_sleep = false;
             return;
         }
+        // A connect+drop entirely inside one poll gap leaves the radio dark for the
+        // rest of the window; the flag is otherwise only serviced past this return.
+        if (bleRestartAdvertisingPending) {
+            esp32_restart_ble_advertising();
+        }
         uint32_t advertising_duration = millis() - advertising_start_time;
         uint32_t advertising_timeout_ms = globalConfig.power_option.sleep_timeout_ms;
         if (advertising_timeout_ms == 0) {
