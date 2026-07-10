@@ -91,6 +91,11 @@ void setup() {
     ble_nrf_stack_init();
 #endif
     if (!is_deep_sleep_wake) {
+        // Arm here rather than at declaration: this branch is the boot screen
+        // redraw, and every real reset (power-on, panic, WDT, SW) clears the
+        // wake cause and lands here. A deep-sleep wake skips it and keeps the
+        // pre-sleep flag, so a wake never advertises as a reboot.
+        rebootFlag = 1;
         // Wake keeps the panel image; skipping initDisplay() (EPD rail power +
         // full refresh) is the wake path's main energy saving.
         initDisplay();
