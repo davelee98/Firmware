@@ -123,12 +123,70 @@ void setup() {
         advertising_timeout_active = true;
         advertising_start_time = millis();
     }
+    // Both sleep paths measure quiet time from here, not from power-on.
+    lastActivityMs = millis();
     #endif
     writeSerial("=== Setup completed successfully ===");
 }
 
+#ifdef TARGET_ESP32
+// Single point of activity detection. Rather than have every producer (BLE host
+// task, buttons, touch, LAN) stamp a timestamp, sample the state they already
+// mutate and treat any change since the previous pass as activity.
+//
+// Runs at the top of loop() so an event raised during the previous pass always
+// lands before this pass decides to sleep.
+static void pollActivity() {
+    static bool activityPrimed = false;
+    static uint8_t prevCommandHead = 0;
+    static uint8_t prevResponseHead = 0;
+    static uint8_t prevConnCount = 0;
+    static bool prevLanSession = false;
+    static uint8_t prevDynamic[sizeof(dynamicreturndata)] = {0};
+
+    // Queue heads are producer-side, so a command that arrived and drained within
+    // a single pass still registers. The heads wrap (mod 5 and 10), but aliasing
+    // needs a whole queue of traffic inside one pass, and queues only fill while a
+    // client is connected — which stamps below regardless.
+    const uint8_t commandHead = commandQueueHead;
+    const uint8_t responseHead = responseQueueHead;
+    // Covers connect and disconnect. The disconnect edge is what re-arms the
+    // window so a dropped client gets a full reconnect opportunity.
+    const uint8_t connCount = (pServer != nullptr) ? (uint8_t)pServer->getConnectedCount() : 0;
+    const bool lanSession = wifiInitialized && wifiServerConnected && wifiClient.connected();
+
+    if (!activityPrimed) {
+        activityPrimed = true;
+    } else if (commandHead != prevCommandHead ||
+               responseHead != prevResponseHead ||
+               connCount != prevConnCount ||
+               lanSession != prevLanSession ||
+               // Button presses and touch events land here before advertising.
+               memcmp(prevDynamic, dynamicreturndata, sizeof(prevDynamic)) != 0 ||
+               // Set by onDisconnect and cleared further down this loop, so it is
+               // the only trace of a connect+drop that lands entirely between two
+               // passes — connCount reads 0 on both sides of such a blip.
+               bleRestartAdvertisingPending ||
+               // A live link or unfinished work is activity in itself, not just its edges.
+               connCount > 0 || lanSession ||
+               commandQueueTail != commandHead ||
+               responseQueueTail != responseHead) {
+        lastActivityMs = millis();
+    }
+
+    prevCommandHead = commandHead;
+    prevResponseHead = responseHead;
+    prevConnCount = connCount;
+    prevLanSession = lanSession;
+    memcpy(prevDynamic, dynamicreturndata, sizeof(prevDynamic));
+}
+#endif
+
 void loop() {
     processLedFlash();
+    #ifdef TARGET_ESP32
+    pollActivity();
+    #endif
     #ifdef TARGET_ESP32
     if (woke_from_deep_sleep && advertising_timeout_active) {
         if (pServer && pServer->getConnectedCount() > 0) {
@@ -143,13 +201,16 @@ void loop() {
         if (bleRestartAdvertisingPending) {
             esp32_restart_ble_advertising();
         }
-        uint32_t advertising_duration = millis() - advertising_start_time;
         uint32_t advertising_timeout_ms = globalConfig.power_option.sleep_timeout_ms;
         if (advertising_timeout_ms == 0) {
-            advertising_timeout_ms = 10000;
+            advertising_timeout_ms = DEFAULT_IDLE_HOLD_MS;
         }
-        if (advertising_duration >= advertising_timeout_ms) {
-            writeSerial("BLE advertising timeout (" + String(advertising_duration) + " ms) - no connection, returning to deep sleep");
+        // Measured from the last activity, not from window start: a client that
+        // connects and drops re-arms the full window instead of inheriting it.
+        uint32_t idle_duration = millis() - lastActivityMs;
+        if (idle_duration >= advertising_timeout_ms) {
+            writeSerial("BLE advertising timeout (idle " + String(idle_duration) + " ms of " +
+                        String(millis() - advertising_start_time) + " ms window) - no connection, returning to deep sleep");
             advertising_timeout_active = false;
             enterDeepSleep();
             return;
@@ -221,13 +282,16 @@ void loop() {
     #else
     const bool wifiLanSession = false;
     #endif
-    bool bleActive = (commandQueueTail != commandQueueHead) ||
-                     (responseQueueTail != responseQueueHead) ||
-                     (pServer && pServer->getConnectedCount() > 0) ||
-                     bleRestartAdvertisingPending ||
-                     epdRefreshInProgress ||
-                     wifiLanSession;
-    if (bleActive) {
+    // Work in flight *this iteration* only. Every term below is transient and most
+    // are cleared earlier in this same loop pass, so this must never be the sole
+    // gate on deep sleep — lastActivityMs supplies the quiet window.
+    bool workInFlight = (commandQueueTail != commandQueueHead) ||
+                        (responseQueueTail != responseQueueHead) ||
+                        (pServer && pServer->getConnectedCount() > 0) ||
+                        bleRestartAdvertisingPending ||
+                        epdRefreshInProgress ||
+                        wifiLanSession;
+    if (workInFlight) {
         processButtonEvents();
         processTouchInput();
         delay(1);
@@ -250,7 +314,17 @@ void loop() {
             }
         }
         if(globalConfig.power_option.deep_sleep_time_seconds > 0 && globalConfig.power_option.power_mode == 1){
-            enterDeepSleep();
+            uint32_t idleHoldMs = globalConfig.power_option.sleep_timeout_ms;
+            if (idleHoldMs == 0) {
+                idleHoldMs = DEFAULT_IDLE_HOLD_MS;
+            }
+            uint32_t idleMs = millis() - lastActivityMs;
+            if (idleMs < idleHoldMs) {
+                idleDelay(5);
+            } else {
+                writeSerial("Idle " + String(idleMs) + " ms (hold " + String(idleHoldMs) + " ms) - entering deep sleep");
+                enterDeepSleep();
+            }
         }
         else{
             idleDelay(2000);
@@ -317,7 +391,7 @@ void fullSetupAfterConnection() {
     writeSerial("=== Full setup completed ===");
 }
 
-void enterDeepSleep() {
+void enterDeepSleep(bool force) {
     if (globalConfig.power_option.power_mode != 1) {
         writeSerial("Skipping deep sleep - not battery powered (power_mode: " + String(globalConfig.power_option.power_mode) + ")");
         delay(2000);
@@ -326,6 +400,13 @@ void enterDeepSleep() {
     if (globalConfig.power_option.deep_sleep_time_seconds == 0) {
         writeSerial("Skipping deep sleep - deep_sleep_time_seconds is 0");
         delay(2000);
+        return;
+    }
+    // Callers sample their idle state before getting here; a central can connect in
+    // that gap. Re-check so we never tear down the stack on a live link.
+    if (!force && pServer != nullptr && pServer->getConnectedCount() > 0) {
+        writeSerial("Skipping deep sleep - BLE client connected");
+        lastActivityMs = millis();
         return;
     }
     writeSerial("Entering deep sleep for " + String(globalConfig.power_option.deep_sleep_time_seconds) + " seconds");
