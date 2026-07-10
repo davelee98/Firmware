@@ -19,6 +19,27 @@
 static HardwareSerial LogSerialPort(1);
 #endif
 
+#ifdef TARGET_ESP32
+// Distinguishes a hidden mid-cycle reset (PANIC/WDT/BROWNOUT/SW) from a real
+// power-on or deep-sleep wake; any reset here clears the wake cause, so the
+// next boot takes the NORMAL BOOT branch and redraws the boot screen.
+static const char* resetReasonName(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_POWERON:   return "POWERON";
+        case ESP_RST_EXT:       return "EXT";
+        case ESP_RST_SW:        return "SW";
+        case ESP_RST_PANIC:     return "PANIC";
+        case ESP_RST_INT_WDT:   return "INT_WDT";
+        case ESP_RST_TASK_WDT:  return "TASK_WDT";
+        case ESP_RST_WDT:       return "WDT";
+        case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+        case ESP_RST_BROWNOUT:  return "BROWNOUT";
+        case ESP_RST_SDIO:      return "SDIO";
+        default:                return "UNKNOWN";
+    }
+}
+#endif
+
 void setup() {
     #if defined(TARGET_ESP32) && defined(OPENDISPLAY_LOG_UART)
     LogSerialPort.begin(115200, SERIAL_8N1, OPENDISPLAY_LOG_UART_RX, OPENDISPLAY_LOG_UART_TX);
@@ -40,6 +61,8 @@ void setup() {
         writeSerial("Git SHA: (not set)");
     }
     #ifdef TARGET_ESP32
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+    writeSerial("Reset reason: " + String(resetReasonName(reset_reason)) + " (" + String((int)reset_reason) + ")");
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
     bool is_deep_sleep_wake = (wakeup_reason != ESP_SLEEP_WAKEUP_UNDEFINED);
     if (is_deep_sleep_wake) {
@@ -53,6 +76,9 @@ void setup() {
     } else {
         woke_from_deep_sleep = false;
         writeSerial("=== NORMAL BOOT ===");
+        // RTC memory survives soft resets (panic/WDT/esp_restart) but not power
+        // loss: a non-zero count on a NORMAL BOOT means a hidden mid-cycle reset.
+        writeSerial("Deep sleep count (RTC): " + String(deep_sleep_count));
     }
     #endif
     writeSerial("Starting setup...");
@@ -105,22 +131,24 @@ void loop() {
         return;
     }
     if (commandQueueTail != commandQueueHead) {
-        writeSerial("ESP32: Processing queued command (" + String(commandQueue[commandQueueTail].len) + " bytes)");
+        const bool quietCmd = imageWriteLogQuietFrame(commandQueue[commandQueueTail].data, commandQueue[commandQueueTail].len);
+        if (!quietCmd) writeSerial("ESP32: Processing queued command (" + String(commandQueue[commandQueueTail].len) + " bytes)");
         imageDataWritten(NULL, NULL, commandQueue[commandQueueTail].data, commandQueue[commandQueueTail].len);
         commandQueue[commandQueueTail].pending = false;
         commandQueueTail = (commandQueueTail + 1) % COMMAND_QUEUE_SIZE;
-        writeSerial("Command processed");
+        if (!quietCmd) writeSerial("Command processed");
     }
     if (responseQueueTail != responseQueueHead) {
         if (esp32_ble_notify_enabled()) {
             uint8_t bleDrain = 0;
             while (responseQueueTail != responseQueueHead && bleDrain < 16) {
-                writeSerial("ESP32: Sending queued response (" + String(responseQueue[responseQueueTail].len) + " bytes)");
+                const bool quietAck = imageWriteLogQuietFrame(responseQueue[responseQueueTail].data, responseQueue[responseQueueTail].len);
+                if (!quietAck) writeSerial("ESP32: Sending queued response (" + String(responseQueue[responseQueueTail].len) + " bytes)");
                 pTxCharacteristic->setValue(responseQueue[responseQueueTail].data, responseQueue[responseQueueTail].len);
                 pTxCharacteristic->notify();
                 responseQueue[responseQueueTail].pending = false;
                 responseQueueTail = (responseQueueTail + 1) % RESPONSE_QUEUE_SIZE;
-                writeSerial("Response sent successfully");
+                if (!quietAck) writeSerial("Response sent successfully");
                 bleDrain++;
             }
         } else if (pServer && pServer->getConnectedCount() > 0) {
@@ -244,9 +272,13 @@ void idleDelay(uint32_t delayMs) {
 #ifdef TARGET_ESP32
 void minimalSetup() {
     writeSerial("=== Minimal Setup (Deep Sleep Wake) ===");
+    writeSerial("[wake] >> full_config_init"); flushLog();
     full_config_init();
+    writeSerial("[wake] << full_config_init >> initio"); flushLog();
     initio();
+    writeSerial("[wake] << initio >> ble_init_esp32"); flushLog();
     ble_init_esp32(true); // Update manufacturer data
+    writeSerial("[wake] << ble_init_esp32"); flushLog();
     writeSerial("=== BLE advertising started (minimal mode) ===");
     writeSerial("Advertising for 10 seconds, waiting for connection...");
     advertising_timeout_active = true;
@@ -435,6 +467,21 @@ void writeSerial(String message, bool newLine){
     #elif !defined(DISABLE_USB_SERIAL)
     if (newLine == true) Serial.println(message);
     else Serial.print(message);
+    #endif
+}
+
+// Blocks until the log UART has physically drained. The IDF panic handler only
+// flushes the console UART, so without this the last lines before a crash are
+// lost on the OPENDISPLAY_LOG_UART port — call after a marker to guarantee it
+// reaches the wire before a suspect call can fault.
+void flushLog(){
+    #if defined(TARGET_ESP32) && defined(OPENDISPLAY_LOG_UART)
+    LogSerialPort.flush();
+    #elif !defined(DISABLE_USB_SERIAL)
+    Serial.flush();
+    #endif
+    #ifdef TARGET_ESP32
+    delay(5);
     #endif
 }
 
