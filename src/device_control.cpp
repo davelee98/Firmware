@@ -34,6 +34,7 @@ extern volatile bool buttonEventPending;
 extern volatile uint8_t lastChangedButtonIndex;
 void updatemsdata();
 void cleanupDirectWriteState(bool refreshDisplay);
+void resetPipeWriteState(void);
 void sendResponse(uint8_t* response, uint16_t len);
 void writeSerial(String message, bool newLine = true);
 
@@ -92,6 +93,7 @@ void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
     writeSerial("=== BLE CLIENT DISCONNECTED ===", true);
     writeSerial("Disconnect reason: " + String(reason), true);
     cleanupDirectWriteState(true);
+    resetPipeWriteState();   // clear any pipe transfer + reorder queue on disconnect
 }
 
 void reboot(){

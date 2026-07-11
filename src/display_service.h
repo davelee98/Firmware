@@ -31,8 +31,17 @@ void initDisplay();
 void writeTextAndFill(const char* text);
 void handleDirectWriteStart(uint8_t* data, uint16_t len);
 void handleDirectWriteData(uint8_t* data, uint16_t len);
-void handleDirectWriteCompressedData(uint8_t* data, uint16_t len);
+// Consumes one direct-write compressed payload into the panel controller. Returns
+// false on overflow/decompress failure; the CALLER owns ACK/NACK emission.
+bool handleDirectWriteCompressedData(uint8_t* data, uint16_t len);
 void cleanupDirectWriteState(bool refreshDisplay);
+// PIPE_WRITE (0x0080-0x0082) sliding-window handlers + state reset.
+void handlePipeWriteStart(uint8_t* data, uint16_t len);
+void handlePipeWriteData(uint8_t* data, uint16_t len);
+void handlePipeWriteEnd(uint8_t* data, uint16_t len);
+void resetPipeWriteState(void);
+// True while a PIPE_WRITE stream is active (mid-transfer log suppression, resets).
+bool pipeWriteActive(void);
 void handleDirectWriteEnd(uint8_t* data, uint16_t len);
 // True while an image push is mid-stream and the per-frame command/ack logging
 // should be suppressed (chunk 1 still logs in full; the meter covers the rest).

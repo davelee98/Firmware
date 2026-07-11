@@ -163,10 +163,20 @@ void sendResponse(uint8_t* response, uint16_t len) {
     // stream is past its first chunk (chunk 1's ack still logs). Computed before
     // `response` is swapped to the encrypted buffer. Errors/NACKs start with 0xFF
     // and never match, so they always log.
-    const bool quietAck = (len == 2 && response[0] == 0x00 && response[1] == 0x71 && imageWriteLogQuietAck());
+    // Also suppress the 7-byte PIPE ACK {00 81 highest_seen mask:4} mid-stream.
+    // Length test uses the plaintext ACK (encryption happens after this check).
+    const bool quietAck = (len == 2 && response[0] == 0x00 && response[1] == 0x71 && imageWriteLogQuietAck())
+                       || (len == 7 && response[0] == 0x00 && response[1] == 0x81 && imageWriteLogQuietAck());
     if (isAuthenticated() && len >= 2) {
         uint16_t command = (response[0] << 8) | response[1];
-        uint8_t status = (len >= 3) ? response[2] : 0x00;
+        // The 7-byte PIPE data ACK {0x00,0x81,highest_seen,mask:4} carries a rolling
+        // seq at byte[2]; a highest_seen of 0xFE/0xFF (any image >= 255 chunks) must
+        // not trip the unencrypted-status heuristic below — pipe ACKs encrypt
+        // normally when authenticated (plan 1.6). Other pipe shapes never collide:
+        // 0x80 response byte[2] = ver (0x01), pipe NACK byte[2] = err (0x01-0x04),
+        // 0x82 acks are 2 bytes (status defaults to 0x00).
+        const bool pipeDataAck = (len == 7 && response[0] == 0x00 && response[1] == 0x81);
+        uint8_t status = (len >= 3 && !pipeDataAck) ? response[2] : 0x00;
         // Encrypt all authenticated responses except auth/version handshakes and FE/FF status.
         // Direct-write / partial-write / LED acks must be encrypted too; LAN/BLE clients decrypt every response.
         if (command != 0x0050 && command != 0x0043 && status != 0xFE && status != 0xFF) {
@@ -224,8 +234,14 @@ void sendResponse(uint8_t* response, uint16_t len) {
             writeSerial(nrfHexDump, true);
             writeSerial("NRF: BLE notification sent (" + String(len) + " bytes)", true);
         }
-        imageCharacteristic.notify(response, len);
-        delay(20);
+        // Bounded retry only when the SoftDevice TX queue is full (notify()==false).
+        // Replaces an unconditional delay(20): pays latency only on backpressure and
+        // speeds the legacy per-chunk path ~20 ms/chunk.
+        bool notified = imageCharacteristic.notify(response, len);
+        for (uint8_t attempt = 0; !notified && attempt < 4; ++attempt) {
+            delay(5);
+            notified = imageCharacteristic.notify(response, len);
+        }
     } else {
         writeSerial("ERROR: Cannot send BLE response - not connected or notifications not enabled", true);
         writeSerial("  Connected: " + String(Bluefruit.connected() ? "yes" : "no"), true);
@@ -490,7 +506,7 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
     uint16_t command = (data[0] << 8) | data[1];
     // Silence the per-frame command spam for image-write data (0x0071) once the
     // stream is past its first chunk; the display handler's 5% meter reports it.
-    const bool quietCmd = (command == 0x0071) && imageWriteLogQuietCmd();
+    const bool quietCmd = (command == 0x0071 || command == 0x0081) && imageWriteLogQuietCmd();
     if (!quietCmd) writeSerial("Processing command: 0x" + String(command, HEX));
 
     if (command == 0x0050) {
@@ -601,6 +617,21 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
         case 0x0072:
             writeSerial("=== DIRECT WRITE END COMMAND (0x0072) ===");
             handleDirectWriteEnd(data + 2, len - 2);
+            break;
+        case 0x0080:
+            writeSerial("=== PIPE WRITE START COMMAND (0x0080) ===");
+            handlePipeWriteStart(data + 2, len - 2);
+            break;
+        case 0x0081:
+            // The replay counter (verifyNonceReplay) already advanced at decrypt time,
+            // above this switch, for every 0x0081 frame — including ones the handler
+            // then queues or discards — so drops/dupes never desync it and the counter
+            // delta stays within in-flight <= W <= 32 <= the +-32 replay window.
+            handlePipeWriteData(data + 2, len - 2);
+            break;
+        case 0x0082:
+            writeSerial("=== PIPE WRITE END COMMAND (0x0082) ===");
+            handlePipeWriteEnd(data + 2, len - 2);
             break;
         case 0x0076:
             handlePartialWriteStart(data + 2, len - 2);
