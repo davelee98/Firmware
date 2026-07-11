@@ -98,15 +98,27 @@ struct PowerOption {
 // queued successors drains. 33 slots = 32 (max window) + 1 safety; the sender's
 // span-based window rule bounds occupancy to <=32 so overflow is a protocol
 // violation, not an expected condition. Indexing by seq % PIPE_REORDER_SLOTS is
-// collision-free because any live window spans <=32 < 33 consecutive seqs.
+// collision-free because any live window spans <=W < PIPE_REORDER_SLOTS seqs.
+//
+// PIPE_SMALL_DRAM_WINDOW is set ONLY by the classic-ESP32 env:esp32-N4 (esp32dev,
+// 320KB RAM). Its static DRAM is far tighter than the S3/C3/C6 parts, so the full
+// 33-slot x 248 B queue (~8.3KB .bss) overflows dram0_0_seg by ~672 B at link.
+// Cap that env to W=16 / 17 slots (~4.2KB); 17 = W+1 keeps seq%SLOTS collision-free
+// (a live window spans <=16 < 17). All other ESP32 envs keep the full 32-deep window.
+#ifdef PIPE_SMALL_DRAM_WINDOW
+#define PIPE_REORDER_SLOTS      17
+#define PIPE_MAX_W      16
+#define PIPE_MAX_N      16
+#else
 #define PIPE_REORDER_SLOTS      33
+#define PIPE_MAX_W      32
+#define PIPE_MAX_N      32
+#endif
 #define PIPE_REORDER_SLOT_SIZE  248    // >= max plaintext data payload (241 @ frame 244; 212 encrypted)
 #define PIPE_ACK_MASK_BITS      32
 
 // PIPE_WRITE device grants / protocol constants (plan Part 1 & 3).
 // frame cap = HA ATT write ceiling (244 B); window cap = ACK-mask width (32).
-#define PIPE_MAX_W      32
-#define PIPE_MAX_N      32
 #define PIPE_MAX_FRAME  244
 #define PIPE_VERSION    0x01
 #define PIPE_FLAG_COMPRESSED 0x01
