@@ -89,7 +89,53 @@ struct PowerOption {
 #define TRANSMISSION_MODE_ZIP            (1u << 1)
 #define TRANSMISSION_MODE_G5             (1u << 2)
 #define TRANSMISSION_MODE_DIRECT_WRITE   (1u << 3)
+#define TRANSMISSION_MODE_PIPE_WRITE     (1u << 4)
 #define TRANSMISSION_MODE_CLEAR_ON_BOOT  (1u << 7)
+
+// PIPE_WRITE (0x0080-0x0082) sliding-window receive state. Out-of-order frames
+// are held in a small reorder queue while the controller stream pauses at a hole;
+// when the missing frame arrives in-order it is written and the contiguous run of
+// queued successors drains. 33 slots = 32 (max window) + 1 safety; the sender's
+// span-based window rule bounds occupancy to <=32 so overflow is a protocol
+// violation, not an expected condition. Indexing by seq % PIPE_REORDER_SLOTS is
+// collision-free because any live window spans <=32 < 33 consecutive seqs.
+#define PIPE_REORDER_SLOTS      33
+#define PIPE_REORDER_SLOT_SIZE  248    // >= max plaintext data payload (241 @ frame 244; 212 encrypted)
+#define PIPE_ACK_MASK_BITS      32
+
+// PIPE_WRITE device grants / protocol constants (plan Part 1 & 3).
+// frame cap = HA ATT write ceiling (244 B); window cap = ACK-mask width (32).
+#define PIPE_MAX_W      32
+#define PIPE_MAX_N      32
+#define PIPE_MAX_FRAME  244
+#define PIPE_VERSION    0x01
+#define PIPE_FLAG_COMPRESSED 0x01
+
+struct PipeReorderSlot {
+    bool     occupied;
+    uint8_t  seq;
+    uint16_t len;
+    uint8_t  data[PIPE_REORDER_SLOT_SIZE];
+};
+
+struct PipeWriteState {
+    bool     active;
+    bool     error;             // fatal: silently discard 0x0081 until next 0x0080 / disconnect
+    bool     compressed;
+    bool     gap_open;          // true while a hole is outstanding (queue non-empty)
+    uint8_t  window;            // W_eff
+    uint8_t  ack_every;         // N_eff
+    uint16_t max_frame;         // frame_eff
+    uint8_t  expected_seq;      // next in-order seq (mod 256)
+    bool     has_received;      // false until first accepted-or-queued frame (highest_seen valid)
+    uint8_t  highest_seen;      // highest received seq (accepted or queued), mod 256
+    uint32_t received_count;    // accepted+queued distinct frames (diagnostics)
+    uint8_t  frames_since_ack;  // cadence counter (in-order accepts)
+    uint8_t  ooo_acks_since_gap;// rate-limit counter for out-of-order / duplicate gap ACKs
+    uint32_t total_size;        // negotiated decompressed panel byte total
+    uint8_t  queued_count;      // reorder-queue occupancy
+    uint8_t  queue_high_water;  // diagnostics: max occupancy seen this transfer
+};
 
 // 0x20: display (repeatable, max 4 instances)
 struct DisplayConfig {

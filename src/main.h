@@ -45,6 +45,7 @@ using namespace Adafruit_LittleFS_Namespace;
 #define MAX_CONFIG_CHUNKS 20  // Maximum number of chunks allowed
 // Response buffer constants
 #define MAX_RESPONSE_DATA_SIZE 100  // Maximum data size in response buffer
+// PIPE_WRITE grants/constants (PIPE_MAX_*, PIPE_VERSION, PIPE_FLAG_*) live in structs.h.
 
 // BLE response codes (second byte only, first byte is always 0x00 for success, 0xFF for error)
 #define RESP_DIRECT_WRITE_START_ACK  0x70  // Direct write start acknowledgment
@@ -252,7 +253,11 @@ void cleanupDirectWriteState(bool refreshDisplay);
 void handleDirectWriteStart(uint8_t* data, uint16_t len);
 void handleDirectWriteData(uint8_t* data, uint16_t len);
 void handleDirectWriteEnd(uint8_t* data = nullptr, uint16_t len = 0);
-void handleDirectWriteCompressedData(uint8_t* data, uint16_t len);
+bool handleDirectWriteCompressedData(uint8_t* data, uint16_t len);
+void handlePipeWriteStart(uint8_t* data, uint16_t len);
+void handlePipeWriteData(uint8_t* data, uint16_t len);
+void handlePipeWriteEnd(uint8_t* data, uint16_t len);
+void resetPipeWriteState(void);
 void handlePartialWriteStart(uint8_t* data, uint16_t len);
 int mapEpd(int id);
 uint8_t getFirmwareMajor();
@@ -366,8 +371,12 @@ BLECharacteristic imageCharacteristic("2446", BLEWrite | BLEWriteWithoutResponse
 // Define queue sizes and structures first
 #define RESPONSE_QUEUE_SIZE 10
 #define MAX_RESPONSE_SIZE 512
-#define COMMAND_QUEUE_SIZE 5
-#define MAX_COMMAND_SIZE 512
+// PIPE_WRITE ingest sizing: 33 slots hold a full W=32 in-flight window + END across a
+// 60 s Spectra SPI stall (loop blocked in bbepWriteData). 256 covers pipe <=244,
+// legacy <=232, HA <=244. A third-party client writing >256 B on a raw 512-MTU link
+// would regress (none known).
+#define COMMAND_QUEUE_SIZE 33
+#define MAX_COMMAND_SIZE 256
 
 struct ResponseQueueItem {
     uint8_t data[MAX_RESPONSE_SIZE];

@@ -185,6 +185,35 @@ static void pollActivity() {
     prevLanSession = lanSession;
     memcpy(prevDynamic, dynamicreturndata, sizeof(prevDynamic));
 }
+
+// Flush queued responses to BLE notifications. Called once per loop() pass and —
+// critically — between commands inside the bounded command drain: at small
+// negotiated ack_every (N_eff 1-2) a 33-command drain can emit up to ~32 pipe
+// ACKs, which would overflow the 10-slot response ring (drops the NEWEST entry)
+// and leave only stale ACKs — lagging window refunds and collapsing throughput.
+static void flushResponseQueueToBle() {
+    if (responseQueueTail == responseQueueHead) return;
+    if (esp32_ble_notify_enabled()) {
+        uint8_t bleDrain = 0;
+        while (responseQueueTail != responseQueueHead && bleDrain < 16) {
+            const bool quietAck = imageWriteLogQuietFrame(responseQueue[responseQueueTail].data, responseQueue[responseQueueTail].len);
+            if (!quietAck) writeSerial("ESP32: Sending queued response (" + String(responseQueue[responseQueueTail].len) + " bytes)");
+            pTxCharacteristic->setValue(responseQueue[responseQueueTail].data, responseQueue[responseQueueTail].len);
+            pTxCharacteristic->notify();
+            responseQueue[responseQueueTail].pending = false;
+            responseQueueTail = (responseQueueTail + 1) % RESPONSE_QUEUE_SIZE;
+            if (!quietAck) writeSerial("Response sent successfully");
+            bleDrain++;
+        }
+    } else if (pServer && pServer->getConnectedCount() > 0) {
+        // Connected but CCCD not enabled yet — keep responses queued
+    } else {
+        while (responseQueueTail != responseQueueHead) {
+            responseQueue[responseQueueTail].pending = false;
+            responseQueueTail = (responseQueueTail + 1) % RESPONSE_QUEUE_SIZE;
+        }
+    }
+}
 #endif
 
 void loop() {
@@ -232,38 +261,30 @@ void loop() {
     // THIS IS THE END OF THE MAIN LOOP() FOR DEEP SLEEP ESP32.  Loop starts over.
     // IF CONNECTION OCCURED THEN SET woke_from_deep_sleep=false and escape above on next loop
     // BELOW THIS IS WHERE ESP32 DOES WORK
-    if (commandQueueTail != commandQueueHead) {
-        const bool quietCmd = imageWriteLogQuietFrame(commandQueue[commandQueueTail].data, commandQueue[commandQueueTail].len);
-        if (!quietCmd) writeSerial("ESP32: Processing queued command (" + String(commandQueue[commandQueueTail].len) + " bytes)");
-    // imageDataWritten (misleading name) actually services any BLE command
-    // services up to 1 command per pass
-        imageDataWritten(NULL, NULL, commandQueue[commandQueueTail].data, commandQueue[commandQueueTail].len);
-        commandQueue[commandQueueTail].pending = false;
-        commandQueueTail = (commandQueueTail + 1) % COMMAND_QUEUE_SIZE; // WRAP THE QUEUE
-        if (!quietCmd) writeSerial("Command processed");
-    }
-    if (responseQueueTail != responseQueueHead) {
-        if (esp32_ble_notify_enabled()) {
-            uint8_t bleDrain = 0;
-            while (responseQueueTail != responseQueueHead && bleDrain < 16) {
-                const bool quietAck = imageWriteLogQuietFrame(responseQueue[responseQueueTail].data, responseQueue[responseQueueTail].len);
-                if (!quietAck) writeSerial("ESP32: Sending queued response (" + String(responseQueue[responseQueueTail].len) + " bytes)");
-                pTxCharacteristic->setValue(responseQueue[responseQueueTail].data, responseQueue[responseQueueTail].len);
-                pTxCharacteristic->notify();
-                responseQueue[responseQueueTail].pending = false;
-                responseQueueTail = (responseQueueTail + 1) % RESPONSE_QUEUE_SIZE;
-                if (!quietAck) writeSerial("Response sent successfully");
-                bleDrain++;
-            }
-        } else if (pServer && pServer->getConnectedCount() > 0) {
-            // Connected but CCCD not enabled yet — keep responses queued
-        } else {
-            while (responseQueueTail != responseQueueHead) {
-                responseQueue[responseQueueTail].pending = false;
-                responseQueueTail = (responseQueueTail + 1) % RESPONSE_QUEUE_SIZE;
-            }
+    // Bounded drain: service up to COMMAND_QUEUE_SIZE commands per pass so a sustained
+    // W-deep PIPE_WRITE window burst isn't starved at one-per-loop, while WiFi/refresh
+    // servicing below still runs each pass. ACQUIRE the head so the payload the producer
+    // wrote before its RELEASE store is visible; RELEASE the tail after consuming.
+    {
+        uint8_t drained = 0;
+        while (drained < COMMAND_QUEUE_SIZE) {
+            uint8_t tail = __atomic_load_n(&commandQueueTail, __ATOMIC_RELAXED);
+            uint8_t head = __atomic_load_n(&commandQueueHead, __ATOMIC_ACQUIRE);
+            if (tail == head) break;
+            const bool quietCmd = imageWriteLogQuietFrame(commandQueue[tail].data, commandQueue[tail].len);
+            if (!quietCmd) writeSerial("ESP32: Processing queued command (" + String(commandQueue[tail].len) + " bytes)");
+            // imageDataWritten (misleading name) actually services any BLE command.
+            imageDataWritten(NULL, NULL, commandQueue[tail].data, commandQueue[tail].len);
+            commandQueue[tail].pending = false;
+            __atomic_store_n(&commandQueueTail, (uint8_t)((tail + 1) % COMMAND_QUEUE_SIZE), __ATOMIC_RELEASE);
+            if (!quietCmd) writeSerial("Command processed");
+            drained++;
+            // Flush responses BETWEEN commands so pipe ACKs generated by this drain
+            // never overflow the 10-slot response ring (see flushResponseQueueToBle).
+            flushResponseQueueToBle();
         }
     }
+    flushResponseQueueToBle();
     if (bleRestartAdvertisingPending) {
         esp32_restart_ble_advertising();
     }
