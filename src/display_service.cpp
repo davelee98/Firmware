@@ -2061,8 +2061,10 @@ void handlePipeWriteStart(uint8_t* data, uint16_t len) {
     if (directWriteActive) cleanupDirectWriteState(false);
     resetPipeWriteState();
 
-    // Fixed 12-byte header; tolerate trailing bytes (future fields).
-    if (len < 12) { sendPipeStartNack(0x01); return; }
+    // Fixed 10-byte payload (opcode already stripped by the dispatcher):
+    // ver(1)+flags(1)+req_w(1)+req_n(1)+client_max_frame(2)+total_size(4).
+    // Tolerate trailing bytes (future fields).
+    if (len < 10) { sendPipeStartNack(0x01); return; }
     uint8_t  ver              = data[0];
     uint8_t  flags            = data[1];
     uint8_t  req_w            = data[2];
