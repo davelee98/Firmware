@@ -1,12 +1,17 @@
 #ifndef BLE_INIT_H
 #define BLE_INIT_H
 
+#include <stdint.h>
+
 #ifdef TARGET_NRF
 void ble_nrf_stack_init();
 void ble_nrf_advertising_start();
 void ble_nrf_boost_advertising(void);
 void ble_nrf_apply_adv_interval(void);
 void ble_nrf_advertising_tick(void);
+// Link diagnostics: log negotiated PHY / ATT MTU / DLE (LL PDU octets) / conn interval.
+void ble_nrf_log_link_params(uint16_t conn_handle, const char* phase);
+void ble_nrf_arm_link_diag(uint16_t conn_handle);   // one-shot: re-log ~2.5 s after connect
 #endif
 #ifdef TARGET_ESP32
 void ble_init();

@@ -38,6 +38,7 @@ extern volatile bool esp32BleNotifySubscribed;
 
 void updatemsdata();
 void cleanupDirectWriteState(bool refreshDisplay);
+void cleanupPartialWriteOnDisconnect(void);
 void resetPipeWriteState(void);
 void touchResumeAfterEpdRefresh(void);
 extern volatile bool epdRefreshInProgress;
@@ -57,8 +58,12 @@ class MyBLEServerCallbacks : public BLEServerCallbacks {
         esp32BleNotifySubscribed = false;
         if (epdRefreshInProgress) {
             writeSerial("EPD refresh in progress — deferring cleanup/advertising to main loop");
-        } else if (directWriteActive) {
-            cleanupDirectWriteState(true);
+        } else {
+            if (directWriteActive) cleanupDirectWriteState(true);
+            // Partial sessions (0x76 or pipe-partial) power the panel without
+            // setting directWriteActive; release it here instead of waiting on
+            // the 15-min partial watchdog.
+            cleanupPartialWriteOnDisconnect();
         }
         resetPipeWriteState();   // clear any pipe transfer + reorder queue on disconnect
         bleRestartAdvertisingPending = true;

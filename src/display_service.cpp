@@ -195,7 +195,19 @@ void checkPartialWriteTimeout(void) {
         (millis() - partialCtx.start_time) > 900000UL) {
         writeSerial("ERROR: Partial write timeout - cleaning up stuck state", true);
         cleanup_partial_write_state();
+        // A pipe-partial transfer shares partialCtx: also clear pipeState so a zombie
+        // pipeState.active can't misroute later 0x0081 frames into the dead partialCtx.
+        if (pipeState.partial) resetPipeWriteState();
     }
+}
+
+// Disconnect hook: a partial session (0x76 or pipe-partial) powers the panel via
+// partial_prepare_panel_ram but never sets directWriteActive, so the disconnect
+// handlers' cleanupDirectWriteState gate misses it and the panel would stay
+// powered until the 15-min watchdog. cleanup_partial_write_state is file-static;
+// this wrapper gives the BLE callbacks a safe no-op-when-idle entry point.
+void cleanupPartialWriteOnDisconnect(void) {
+    if (partialCtx.active) cleanup_partial_write_state();
 }
 
 #define AXP2101_SLAVE_ADDRESS 0x34
@@ -1757,6 +1769,11 @@ void handlePartialWriteStart(uint8_t* data, uint16_t len) {
 }
 
 void handleDirectWriteData(uint8_t* data, uint16_t len) {
+    // A pipe transfer (0x0080-0x0082) owns the panel session — and a pipe-partial
+    // one owns partialCtx. A stray legacy 0x71 must not feed that context out of
+    // band from the sliding-window seq accounting. Silent-discard mirrors how the
+    // pipe path treats frames after a fatal error.
+    if (pipeState.active) return;
     if (partialCtx.active) {
         if (len == 0) return;
         imageWriteLogChunk(data, len);
@@ -1810,6 +1827,10 @@ void handleDirectWriteData(uint8_t* data, uint16_t len) {
 }
 
 void handleDirectWriteEnd(uint8_t* data, uint16_t len) {
+    // Same guard as handleDirectWriteData: a stray legacy 0x72 mid-pipe must not
+    // finalize/refresh a pipe-owned session (partial would commit new_etag==0 and
+    // leave pipeState zombied; full-frame would refresh with pipeState still active).
+    if (pipeState.active) return;
     if (partialCtx.active) {
         if (data != nullptr && len > 1) {
             send_direct_write_nack(0x72, ERR_PARTIAL_STREAM, true);
@@ -1935,6 +1956,23 @@ static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t end
 // directWriteActivatePanel / pipeConsumePayload -> bbepWriteData / zlib) so the
 // legacy 0x70/0x71/0x72 path is untouched. Out-of-order frames are held in a
 // 33-slot reorder queue while the controller stream pauses at a hole.
+//
+// PARTIAL-REGION mode (PIPE_FLAG_PARTIAL, flags bit1): a single-rectangle partial
+// update rides the same sliding window. The 0x0080 START gains a 12-byte LE
+// extension appended after total_size (payload len 22 instead of 10):
+//   [old_etag:4 LE][x:2][y:2][w:2][h:2]   (LE, unlike 0x76's big-endian layout).
+// total_size is the decompressed logical stream size = plane_size*2 where
+// plane_size = calc_controller_plane_bytes(w,h) (old plane then new plane, the
+// same stream 0x76 uses). Geometry/etag are validated exactly like the 0x76
+// handler; the ACK sets response flags bit1 to confirm partial acceptance. DATA
+// (0x0081) is routed to partialCtx (two 1bpp controller planes) instead of the
+// full-frame writer, and partial transfers NEVER auto-complete — the explicit
+// 0x0082 END carries the refresh selector (0->FULL,1->FAST,2/absent->PARTIAL) and
+// new_etag [refresh:1][new_etag:4 BE], driving partial_write_to_panel().
+// START NACK codes: 0x01 len/ver, 0x02 unknown flag, 0x03 size mismatch,
+// 0x05 ETAG_MISMATCH (partial), 0x06 PARTIAL_UNSUPPORTED (partial, bpp!=1/seeed),
+// 0x07 RECT_INVALID (partial, zero/OOB/misaligned rect). Any partial START NACK
+// at the geometry/etag stages clears displayed_etag (parity with 0x76).
 // ===========================================================================
 
 static inline uint8_t pipeSlot(uint8_t seq) { return (uint8_t)(seq % PIPE_REORDER_SLOTS); }
@@ -2001,7 +2039,15 @@ static void sendPipeNack(uint8_t err) {
     pipeBuildAckPayload(r + 3);
     sendResponse(r, sizeof(r));
     pipeState.error = true;
-    cleanupDirectWriteState(true);
+    // Partial transfers own partialCtx, not the full-frame direct-write session:
+    // clear the negotiated etag (any partial NACK invalidates it, parity with
+    // send_direct_write_nack) and power the panel down via the partial cleanup.
+    if (pipeState.partial) {
+        displayed_etag = 0;
+        cleanup_partial_write_state();
+    } else {
+        cleanupDirectWriteState(true);
+    }
 }
 
 // {0xFF,0x80, err, 0x00}. Caller owns any session teardown.
@@ -2027,6 +2073,14 @@ static void pipeUpdateHighestSeen(uint8_t seq) {
 static bool pipeConsumePayload(uint8_t* data, uint16_t len) {
     if (len == 0) return true;
     imageWriteLogChunk(data, len);
+    // Partial transfers stream into the two 1bpp controller planes via partialCtx;
+    // partial_consume_bytes handles zlib-vs-raw and plane-at-a-time sub-window
+    // addressing itself, so the full-frame directWrite* writers below are skipped.
+    if (pipeState.partial) {
+        if (!partial_consume_bytes(data, (uint32_t)len)) return false;
+        imageWriteLogProgress(partialCtx.bytes_received, partialCtx.expected_stream_size);
+        return true;
+    }
     if (directWriteCompressed) {
         if (!handleDirectWriteCompressedData(data, len)) return false;
         directWriteCompressedReceived += len;
@@ -2074,18 +2128,60 @@ void handlePipeWriteStart(uint8_t* data, uint16_t len) {
                               | ((uint32_t)data[8] << 16) | ((uint32_t)data[9] << 24);
 
     if (ver != PIPE_VERSION) { sendPipeStartNack(0x01); return; }
-    // Only zlib compression (flags bit0) is defined; any reserved bit set is unsupported.
-    if ((flags & ~PIPE_FLAG_COMPRESSED) != 0) { sendPipeStartNack(0x02); return; }
+    // Defined flags: bit0 zlib compression, bit1 partial-region refresh. Any other bit unsupported.
+    if ((flags & ~(PIPE_FLAG_COMPRESSED | PIPE_FLAG_PARTIAL)) != 0) { sendPipeStartNack(0x02); return; }
 
     bool compressed = (flags & PIPE_FLAG_COMPRESSED) != 0;
+    bool partial    = (flags & PIPE_FLAG_PARTIAL) != 0;
 
-    // Geometry is pure config math (no panel I/O), so total_size can be validated
-    // before any hardware is touched — a NACK here needs no teardown.
-    directWriteComputeGeometry(compressed);
-    // total_size is the decompressed panel byte total for BOTH modes (plan 1.1).
-    if (total_size != directWriteTotalBytes) {
-        sendPipeStartNack(0x03);
-        return;
+    // Partial START appends a 12-byte LE extension after total_size (payload len 22 vs 10):
+    // [old_etag:4][x:2][y:2][w:2][h:2]. LE, unlike 0x76's big-endian layout.
+    if (partial && len < 22) { sendPipeStartNack(0x01); return; }
+    uint32_t old_etag = 0;
+    uint16_t rectX = 0, rectY = 0, rectW = 0, rectH = 0;
+    uint32_t planeBytes = 0;
+    if (partial) {
+        old_etag = (uint32_t)data[10] | ((uint32_t)data[11] << 8)
+                 | ((uint32_t)data[12] << 16) | ((uint32_t)data[13] << 24);
+        rectX = (uint16_t)data[14] | ((uint16_t)data[15] << 8);
+        rectY = (uint16_t)data[16] | ((uint16_t)data[17] << 8);
+        rectW = (uint16_t)data[18] | ((uint16_t)data[19] << 8);
+        rectH = (uint16_t)data[20] | ((uint16_t)data[21] << 8);
+
+        // Partial validations (plan 1.2, order 5-7). All precede any hardware touch; any
+        // failure clears displayed_etag for parity with send_direct_write_nack. These are
+        // the same checks the 0x76 handler runs (bpp, etag, bounds, alignment).
+        uint16_t dispW = globalConfig.displays[0].pixel_width;
+        uint16_t dispH = globalConfig.displays[0].pixel_height;
+        // 5: two 1bpp controller planes are the partial mechanism; seeed/IT8951 has no equivalent.
+        if (getBitsPerPixel() != 1 || seeed_driver_used()) {
+            displayed_etag = 0; sendPipeStartNack(0x06); return;
+        }
+        // 6: etag gate — nonzero and must match what is currently on the panel.
+        if (old_etag == 0 || old_etag != displayed_etag) {
+            displayed_etag = 0; sendPipeStartNack(0x05); return;
+        }
+        // 7: rectangle must be non-empty, in-bounds, and x/width byte-aligned (1bpp packing).
+        if (rectW == 0 || rectH == 0 ||
+            (uint32_t)rectX + rectW > dispW || (uint32_t)rectY + rectH > dispH ||
+            (rectX & 7u) != 0 || (rectW & 7u) != 0) {
+            displayed_etag = 0; sendPipeStartNack(0x07); return;
+        }
+    }
+
+    // total_size validation (plan 1.2, order 8). Pure config/geometry math (no panel I/O),
+    // so a NACK here needs no teardown. Partial: plane_size*2 (flat old+new planes, like
+    // 0x76). Full: directWriteComputeGeometry's decompressed panel byte total.
+    if (partial) {
+        planeBytes = calc_controller_plane_bytes(rectW, rectH);
+        if (planeBytes == 0 || total_size != planeBytes * 2u) {
+            // Plan 1.2: every partial-request NACK at steps 5-8 clears the etag
+            // (parity with send_direct_write_nack).
+            displayed_etag = 0; sendPipeStartNack(0x03); return;
+        }
+    } else {
+        directWriteComputeGeometry(compressed);
+        if (total_size != directWriteTotalBytes) { sendPipeStartNack(0x03); return; }
     }
 
     // Effective values (min-rule, plan 1.1). Floors at 1; N <= W; frame <= 244.
@@ -2113,21 +2209,56 @@ void handlePipeWriteStart(uint8_t* data, uint16_t len) {
     pipeState.total_size = total_size;
     pipeState.queued_count = 0;
     pipeState.queue_high_water = 0;
+    pipeState.partial = partial;
+
+    // Partial transfers own partialCtx (two 1bpp planes); init it exactly as the 0x76
+    // START does, but new_etag stays 0 — it rides the 0x0082 END. Bookkeeping only; the
+    // panel RAM prep (partial_prepare_panel_ram) waits until after the ACK, below.
+    if (partial) {
+        memset(&partialCtx, 0, sizeof(partialCtx));
+        partialCtx.active = true;
+        partialCtx.compressed = compressed;
+        partialCtx.flags = flags;
+        partialCtx.new_etag = 0;
+        partialCtx.x = rectX;
+        partialCtx.y = rectY;
+        partialCtx.width = rectW;
+        partialCtx.height = rectH;
+        partialCtx.expected_stream_size = total_size;
+        partialCtx.plane_size = planeBytes;
+        partialCtx.current_plane = 0xFF;
+        partialCtx.start_time = millis();
+    }
 
     // Respond BEFORE panel bring-up: slow panels (Spectra/ACeP-class init can take
-    // > 2 s) must not blow the client's 2 s pipe probe, which would cache pipe mode
-    // off for the whole connection on exactly the devices that need it most.
+    // seconds) must not starve the client's 0x0080 START wait. Clients gate pipe
+    // attempts on the config pipe bit and wait a normal command timeout (30 s,
+    // sized for the ESP32 response-queue flush landing after bring-up), but
+    // responding first keeps the wait short on nRF and any direct-notify path.
     // Ordering is safe on both targets: on ESP32 this handler runs in the main-loop
     // queue drain, so 0x0081 frames arriving during bring-up park in the 33-slot
     // ingest ring until we return; on nRF the Bluefruit write callback dispatches
     // commands sequentially from its callback task, so activation below completes
     // before any queued 0x0081 write is handed to the dispatcher.
-    // Device maxima; flags bit0 SET (buffers out-of-order / selective repeat).
+    // Device maxima; flags bit0 SET (selective repeat), bit1 = partial accepted (plan 1.2).
     uint8_t resp[8] = {0x00, 0x80, PIPE_VERSION, PIPE_MAX_W, PIPE_MAX_N,
-                       (uint8_t)(PIPE_MAX_FRAME & 0xFF), (uint8_t)((PIPE_MAX_FRAME >> 8) & 0xFF), 0x01};
+                       (uint8_t)(PIPE_MAX_FRAME & 0xFF), (uint8_t)((PIPE_MAX_FRAME >> 8) & 0xFF),
+                       (uint8_t)(0x01 | (partial ? PIPE_FLAG_PARTIAL : 0))};
     sendResponse(resp, sizeof(resp));
 
-    // Bring up the session exactly like legacy START (touch suspend, panel prep).
+    if (partial) {
+        // Partial bring-up (0x76 parity): white-fill both controller planes and reset the
+        // zlib stream if compressed. Deliberately NOT the full-frame path — do not suspend
+        // touch, set directWriteActive, or call directWriteActivatePanel (partial_write_to_panel
+        // powers the panel down on the 0x0082 END; partial_prepare_panel_ram brought it up).
+        imageWriteLogReset();
+        imageWriteLogStart(total_size);
+        partial_prepare_panel_ram();
+        if (compressed) od_zlib_stream_reset(total_size);
+        return;
+    }
+
+    // Bring up the full-frame session exactly like legacy START (touch suspend, panel prep).
     imageWriteLogReset();
     touchSuspendForEpdRefresh();
     directWriteTouchSuspended = true;
@@ -2172,9 +2303,12 @@ void handlePipeWriteData(uint8_t* data, uint16_t len) {
             if (pipeState.frames_since_ack < 0xFF) pipeState.frames_since_ack++;
         }
         if (pipeState.queued_count == 0) pipeState.gap_open = false;
-        // Auto-complete (uncompressed only, mirrors legacy handleDirectWriteData auto-finish).
-        // The shared helper emits the single unsolicited {0x00,0x82} END ack then refreshes.
-        if (!pipeState.compressed && directWriteBytesWritten >= directWriteTotalBytes) {
+        // Auto-complete (uncompressed FULL-FRAME only, mirrors legacy handleDirectWriteData
+        // auto-finish). The shared helper emits the single unsolicited {0x00,0x82} END ack then
+        // refreshes with a FULL waveform. MUST be gated on !partial: a partial transfer never
+        // touches directWrite* (both are 0), so 0>=0 would false-fire a FULL refresh on the very
+        // first frame — partial transfers complete only on the explicit 0x0082 END (plan 1.5).
+        if (!pipeState.partial && !pipeState.compressed && directWriteBytesWritten >= directWriteTotalBytes) {
             sendPipeAck();                                   // final tail flush ({0x00,0x81})
             directWriteFinishAndRefresh(nullptr, 0, 0x82);   // {0x00,0x82} + FULL refresh, no etag
             resetPipeWriteState();
@@ -2238,13 +2372,56 @@ void handlePipeWriteEnd(uint8_t* data, uint16_t len) {
         uint8_t n[2] = {0xFF, 0x82};   // a fatal error already NACKed this transfer
         sendResponse(n, sizeof(n));
         // sendPipeNack already released the panel hardware at NACK time; this
-        // re-run is a defensive no-op (directWriteActive/displayPowerState false).
-        cleanupDirectWriteState(false);
+        // re-run is a defensive no-op (partialCtx / directWriteActive already down).
+        if (pipeState.partial) cleanup_partial_write_state();
+        else cleanupDirectWriteState(false);
         resetPipeWriteState();
         return;
     }
     // Tail-flush ACK precedes the END result (plan 1.3c / 1.5).
     sendPipeAck();
+
+    // Partial transfers never auto-complete (plan 1.5): the 0x0082 END alone carries the
+    // refresh mode + new_etag. Completeness mirrors the 0x76 partial branch.
+    if (pipeState.partial) {
+        bool incomplete = (pipeState.queued_count > 0);
+        if (partialCtx.compressed) {
+            if (partialCtx.bytes_received == 0 || !zlib_stream_to_partial_write(nullptr, 0, true)) incomplete = true;
+        } else if (partialCtx.bytes_written != partialCtx.expected_stream_size) {
+            incomplete = true;
+        }
+        if (incomplete) {
+            uint8_t n[2] = {0xFF, 0x82};
+            sendResponse(n, sizeof(n));
+            displayed_etag = 0;
+            cleanup_partial_write_state();
+            resetPipeWriteState();
+            return;
+        }
+        imageWriteLogFinish(partialCtx.bytes_received, partialCtx.expected_stream_size);
+        uint8_t ackResponse[] = {0x00, 0x82};
+        sendResponse(ackResponse, sizeof(ackResponse));
+        // Refresh selector rides the END tail (plan 1.4): 0->FULL, 1->FAST, 2/absent->PARTIAL.
+        int refreshMode = REFRESH_PARTIAL;
+        if (data != nullptr && len >= 1 && data[0] == REFRESH_FULL) refreshMode = REFRESH_FULL;
+        else if (data != nullptr && len >= 1 && data[0] == REFRESH_FAST) refreshMode = REFRESH_FAST;
+        // new_etag rides the END tail [refresh:1][new_etag:4 BE]; absent => 0.
+        uint32_t newEtag = (len >= 5) ? parse_be_u32(data + 1) : 0;
+        bool refreshSuccess = partial_write_to_panel(refreshMode);
+        if (refreshSuccess) {
+            displayed_etag = newEtag;
+            uint8_t validatedResponse[] = {0x00, 0x73};
+            sendResponse(validatedResponse, sizeof(validatedResponse));
+        } else {
+            displayed_etag = 0;
+            uint8_t timeoutResponse[] = {0x00, 0x74};
+            sendResponse(timeoutResponse, sizeof(timeoutResponse));
+        }
+        cleanup_partial_write_state();
+        resetPipeWriteState();
+        return;
+    }
+
     // The client must not send END before every chunk is acked; a hole or short
     // byte count here is a protocol violation.
     bool incomplete = (pipeState.queued_count > 0);

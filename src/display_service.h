@@ -51,6 +51,7 @@ bool imageWriteLogQuietFrame(const uint8_t* data, uint16_t len);
 extern volatile bool epdRefreshInProgress;
 void handlePartialWriteStart(uint8_t* data, uint16_t len);
 void checkPartialWriteTimeout(void);
+void cleanupPartialWriteOnDisconnect(void);
 int getplane();
 int getBitsPerPixel();
 

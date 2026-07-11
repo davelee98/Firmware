@@ -122,6 +122,10 @@ struct PowerOption {
 #define PIPE_MAX_FRAME  244
 #define PIPE_VERSION    0x01
 #define PIPE_FLAG_COMPRESSED 0x01
+// bit1: partial-region refresh. START carries a 12-byte LE extension
+// [old_etag:4][x:2][y:2][w:2][h:2]; geometry/etag validated like 0x76, refresh
+// mode + new_etag ride the 0x0082 END. See PIPE_WRITE section in display_service.cpp.
+#define PIPE_FLAG_PARTIAL 0x02
 
 struct PipeReorderSlot {
     bool     occupied;
@@ -134,6 +138,7 @@ struct PipeWriteState {
     bool     active;
     bool     error;             // fatal: silently discard 0x0081 until next 0x0080 / disconnect
     bool     compressed;
+    bool     partial;           // partial-region transfer: route DATA to partialCtx, END drives REFRESH_PARTIAL
     bool     gap_open;          // true while a hole is outstanding (queue non-empty)
     uint8_t  window;            // W_eff
     uint8_t  ack_every;         // N_eff

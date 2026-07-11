@@ -83,6 +83,51 @@ void ble_nrf_advertising_tick(void) {
     Bluefruit.Advertising.start(0);
 }
 
+// --- Link-layer diagnostics -------------------------------------------------
+// DLE (Data Length Extension) sets the max Link-Layer PDU payload: 27 octets by
+// default, up to 251 once negotiated. The nRF peripheral only auto-accepts the
+// central's request, which arrives AFTER connect_callback, so we log twice: once
+// at connect (baseline) and once ~2.5 s later (negotiated).
+void ble_nrf_log_link_params(uint16_t conn_handle, const char* phase) {
+    BLEConnection* conn = Bluefruit.Connection(conn_handle);
+    if (conn == nullptr) {
+        writeSerial(String("[LINK ") + phase + "] no connection (handle " + String(conn_handle) + ")");
+        return;
+    }
+    uint8_t  phy = conn->getPHY();
+    uint16_t mtu = conn->getMtu();                // ATT MTU (23 default; 247 cap here)
+    uint16_t dle = conn->getDataLength();         // LL PDU payload octets (27 default; 251 max)
+    uint16_t ci  = conn->getConnectionInterval(); // units of 1.25 ms
+    const char* phyStr = (phy == BLE_GAP_PHY_2MBPS) ? "2M" :
+                         (phy == BLE_GAP_PHY_1MBPS) ? "1M" : "?";
+    writeSerial(String("[LINK ") + phase + "] PHY=" + phyStr +
+                "  ATT_MTU=" + String(mtu) +
+                "  DLE=" + String(dle) + " octets" +
+                "  connInterval=" + String(ci * 1.25f, 2) + " ms");
+}
+
+// One-shot timer (armed only in connect_callback — no per-loop polling). Fires
+// once on the FreeRTOS timer task after the central finishes negotiation.
+static SoftwareTimer s_link_diag_timer;
+static uint16_t      s_link_diag_conn = BLE_CONN_HANDLE_INVALID;
+
+static void ble_nrf_link_diag_cb(TimerHandle_t /*xTimer*/) {
+    if (Bluefruit.connected()) {
+        ble_nrf_log_link_params(s_link_diag_conn, "negotiated");
+    }
+}
+
+void ble_nrf_arm_link_diag(uint16_t conn_handle) {
+    s_link_diag_conn = conn_handle;
+    static bool created = false;
+    if (!created) {
+        // Create the one-shot (repeating=false) on the first connection only.
+        s_link_diag_timer.begin(2500, ble_nrf_link_diag_cb, NULL, false);
+        created = true;
+    }
+    s_link_diag_timer.reset();   // start/restart the one-shot from now; fires ~2.5 s later
+}
+
 void ble_nrf_stack_init() {
     Bluefruit.configCentralBandwidth(BANDWIDTH_MAX);
     Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
