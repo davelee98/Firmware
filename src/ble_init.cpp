@@ -160,12 +160,6 @@ void ble_nrf_stack_init() {
     Bluefruit.autoConnLed(false);
     Bluefruit.setTxPower(globalConfig.power_option.tx_power);
     Bluefruit.begin(1, 0);
-    if (!isEncryptionEnabled()) {
-        bledfu.begin();
-        writeSerial("BLE DFU initialized successfully (encryption disabled)");
-    } else {
-        writeSerial("BLE DFU service NOT initialized (encryption enabled - use CMD_ENTER_DFU)");
-    }
     writeSerial("BLE initialized successfully");
     writeSerial("Setting up BLE service 0x2446...");
     imageService.begin();
@@ -174,6 +168,18 @@ void ble_nrf_stack_init() {
     writeSerial("BLE write callback set");
     imageCharacteristic.begin();
     writeSerial("BLE characteristic started");
+    // Register the DFU service LAST so its presence/absence (it is only added when
+    // encryption is disabled) never shifts the handles of imageCharacteristic and its
+    // CCCD. GATT handles are assigned in begin() order; keeping the app characteristic
+    // ahead of the conditional DFU service keeps its handles stable across encryption
+    // on/off, so a client's cached CCCD handle stays valid and notify setup won't fail
+    // with ATT "Invalid handle". Must stay after Bluefruit.begin() (SoftDevice up first).
+    if (!isEncryptionEnabled()) {
+        bledfu.begin();
+        writeSerial("BLE DFU initialized successfully (encryption disabled)");
+    } else {
+        writeSerial("BLE DFU service NOT initialized (encryption enabled - use CMD_ENTER_DFU)");
+    }
     Bluefruit.Periph.setConnectCallback(connect_callback);
     Bluefruit.Periph.setDisconnectCallback(disconnect_callback);
     writeSerial("BLE callbacks registered");
