@@ -2558,14 +2558,13 @@ void handlePipeWriteEnd(uint8_t* data, uint16_t len) {
 }
 
 static void cleanup_partial_write_state(void) {
-    bool powerDown = partialCtx.active && displayPowerState;
+    // Tear the panel down only when a transfer/refresh is actually in flight
+    // (PWR_ACTIVE) — i.e. on error / NACK / disconnect-mid-stream / watchdog. After
+    // a successful refresh, epdSessionRelease already moved to PWR_WARM, so
+    // post-success cleanups become bookkeeping-only and leave keep-alive running.
+    bool teardown = partialCtx.active && pwrmgmState == PWR_ACTIVE;
     memset(&partialCtx, 0, sizeof(partialCtx));
-    if (powerDown) {
-        bbepSleep(&bbep, 1);
-        delay(200);
-        displayPowerState = false;
-        pwrmgm(false);
-    }
+    if (teardown) epdSessionForceOff();
 }
 
 static bool panel_skips_bbep_set_addr_window(void) {
@@ -2811,22 +2810,27 @@ static bool partial_trigger_refresh(int refreshMode) {
 static void partial_prepare_panel_ram(void) {
     // Delta in ms since function entry, to profile where prep wall-clock goes.
     uint32_t t0 = millis();
-    writeSerial("[+" + String(millis() - t0) + "ms] EPD partial start: auto-fill panel RAM", true);
-    if (!displayPowerState) {
-        pwrmgm(true);
+    writeSerial("[+" + String(millis() - t0) + "ms] EPD partial start: acquire panel session", true);
+    // Acquire subsumes pwrmgm(true) + bbepInitIO + bbepWakeUp + init-seq resend.
+    // Warm re-acquire skips the ~900 ms rail bring-up + bbepInitIO (Phase 1).
+    bool cold = epdSessionAcquire(true);
+    writeSerial("[+" + String(millis() - t0) + "ms] after epdSessionAcquire (" +
+                String(cold ? "cold" : "warm") + ")", true);
+    // The two white fills guarantee PLANE_0 == PLANE_1 OUTSIDE the rect so uninit
+    // controller RAM can't flash noise during MASTER_ACTIVATE. A full-frame rect's
+    // enforced plane_size*2 stream overwrites 100% of both planes, so there is no
+    // "outside the rect" to protect — provably safe to skip even on a cold panel
+    // (Phase 1 skip condition 1). Sub-rects still fill.
+    bool fullFrame = partialCtx.x == 0 && partialCtx.y == 0 &&
+                     partialCtx.width  == globalConfig.displays[0].pixel_width &&
+                     partialCtx.height == globalConfig.displays[0].pixel_height;
+    if (!fullFrame) {
+        bbepFill(&bbep, BBEP_WHITE, PLANE_1);
+        bbepFill(&bbep, BBEP_WHITE, PLANE_0);
+        writeSerial("[+" + String(millis() - t0) + "ms] after fills (ran: sub-rect)", true);
+    } else {
+        writeSerial("[+" + String(millis() - t0) + "ms] fills skipped (full-frame rect)", true);
     }
-    writeSerial("[+" + String(millis() - t0) + "ms] after pwrmgm(true)", true);
-    bbepInitIO(&bbep, globalConfig.displays[0].dc_pin, globalConfig.displays[0].reset_pin, globalConfig.displays[0].busy_pin, globalConfig.displays[0].cs_pin, globalConfig.displays[0].data_pin, globalConfig.displays[0].clk_pin, 8000000);
-    writeSerial("[+" + String(millis() - t0) + "ms] after bbepInitIO", true);
-    bbepWakeUp(&bbep);
-    writeSerial("[+" + String(millis() - t0) + "ms] after bbepWakeUp", true);
-    const uint8_t* initSeq = bbep.pInitPart ? bbep.pInitPart : bbep.pInitFull;
-    bbepSendCMDSequence(&bbep, initSeq);
-    writeSerial("[+" + String(millis() - t0) + "ms] after bbepSendCMDSequence", true);
-    bbepFill(&bbep, BBEP_WHITE, PLANE_1);
-    writeSerial("[+" + String(millis() - t0) + "ms] after bbepFill PLANE_1", true);
-    bbepFill(&bbep, BBEP_WHITE, PLANE_0);
-    writeSerial("[+" + String(millis() - t0) + "ms] after bbepFill PLANE_0", true);
 }
 
 static bool partial_write_to_panel(int refreshMode) {
@@ -2841,14 +2845,15 @@ static bool partial_write_to_panel(int refreshMode) {
     writeSerial(")", true);
 
     if (partialCtx.bytes_written != partialCtx.expected_stream_size) return false;
-//    delay(20);  THIS DELAY IS UNNEEDED 
+//    delay(20);  THIS DELAY IS UNNEEDED
     epdRefreshInProgress = true;
     bool refreshSuccess = partial_trigger_refresh(refreshMode);
     epdRefreshInProgress = false;
-    bbepSleep(&bbep, 1);
-    delay(50);
-    displayPowerState = false;
-    pwrmgm(false);
+    // A successful partial refresh leaves both controller planes consistent.
+    if (refreshSuccess) epdPlanesPrepared = true;
+    // Release keeps the panel warm (rail/SPI up, controller awake) on success;
+    // powers it fully down on failure or on AXP2101 (window 0) boards.
+    epdSessionRelease(refreshSuccess);
     return refreshSuccess;
 }
 
