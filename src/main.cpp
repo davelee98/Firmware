@@ -504,7 +504,16 @@ void pwrmgm(bool onoff){
         writeSerial("No display configured");
         return;
     }
+    // Idempotency guard keyed on the panel power state machine (the single source
+    // of truth). Makes every legacy caller safe: a same-state call becomes a no-op,
+    // while a real transition (true-after-false, or the boot true/false/true rail
+    // cycle) always proceeds because each call flips the state. pwrmgm owns the
+    // OFF<->(ACTIVE) transitions; epdSessionAcquire/Release own ACTIVE<->WARM.
+    if (onoff  && pwrmgmState != PWR_OFF) return;   // already powered (WARM or ACTIVE)
+    if (!onoff && pwrmgmState == PWR_OFF) return;   // already off
     displayPowerState = onoff;
+    pwrmgmState = onoff ? PWR_ACTIVE : PWR_OFF;
+    if (!onoff) pwrmgmOffDeadlineMs = 0;
     uint8_t axp2101_bus_id = 0xFF;
     bool axp2101_found = false;
     for(uint8_t i = 0; i < globalConfig.sensor_count; i++){

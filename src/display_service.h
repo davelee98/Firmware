@@ -6,6 +6,22 @@
 
 #define OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE 2048
 
+// EPD panel power state machine states. The enum type + keep-alive constant live
+// in this shared header (included by both main.cpp via main.h and by
+// display_service.cpp) so the type is visible to every TU. The single
+// source-of-truth VARIABLES (pwrmgmState / pwrmgmOffDeadlineMs / pwrmgmLock) are
+// DEFINED in main.h next to displayPowerState and externed in display_service.cpp.
+// PWR_OFF must be 0: BSS-zero after boot / ESP32 deep-sleep wake == rail off.
+enum PwrMgmState : uint8_t { PWR_OFF = 0, PWR_WARM = 1, PWR_ACTIVE = 2 };
+#define EPD_KEEPALIVE_MS 30000   // keep-alive window (ms); bounded, hard cap ~60 s
+
+// EPD panel power session (keep-alive) cross-TU API. Acquire/Release are
+// file-static in display_service.cpp (they own the ACTIVE<->WARM transitions and
+// need panel-init knowledge); these are the public entry points.
+void epdSessionForceOff(void);   // power the panel fully down now (idempotent)
+void epdSessionTick(void);       // millis()-poll from loop()/idleDelay(): expire keep-alive
+bool epdSessionIsWarm(void);     // true when the panel is powered-idle (PWR_WARM)
+
 bool seeed_driver_used(void);
 int mapEpd(int id);
 bool waitforrefresh(int timeout);

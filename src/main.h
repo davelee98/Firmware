@@ -187,6 +187,12 @@ uint32_t directWriteCompressedReceived = 0;  // Total compressed bytes received 
 
 uint32_t directWriteStartTime = 0;  // Timestamp when direct write started (for timeout detection)
 bool displayPowerState = false;  // Track display power state (true = powered on, false = powered off)
+// EPD panel power state machine — single source of truth for panel power. The
+// legacy displayPowerState bool is kept synced: displayPowerState == (pwrmgmState != PWR_OFF).
+// enum PwrMgmState + EPD_KEEPALIVE_MS are defined in display_service.h (shared header).
+volatile uint8_t pwrmgmState = PWR_OFF;  // PWR_OFF / PWR_WARM / PWR_ACTIVE
+uint32_t pwrmgmOffDeadlineMs = 0;        // keep-alive deadline (millis); valid only in PWR_WARM
+volatile uint8_t pwrmgmLock = 0;         // cross-task try-lock (nRF BLE task vs loop task)
 
 bool waitforrefresh(int timeout);
 void pwrmgm(bool onoff);
