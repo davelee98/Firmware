@@ -358,7 +358,7 @@ bool waitforrefresh(int timeout){
             writeSerial("Refresh took ", false);
             writeSerial((String)((float)i / 10), false);
             writeSerial(" seconds", true);
-            delay(200);
+//            delay(200);   // EXTRA DELAY HERE IS UNNEEDED AND JUST SLOWS THINGS DOWN
             return true;
         }
     }
@@ -2694,16 +2694,24 @@ static bool partial_trigger_refresh(int refreshMode) {
 }
 
 static void partial_prepare_panel_ram(void) {
-    writeSerial("EPD partial start: auto-fill panel RAM", true);
+    // Delta in ms since function entry, to profile where prep wall-clock goes.
+    uint32_t t0 = millis();
+    writeSerial("[+" + String(millis() - t0) + "ms] EPD partial start: auto-fill panel RAM", true);
     if (!displayPowerState) {
         pwrmgm(true);
     }
+    writeSerial("[+" + String(millis() - t0) + "ms] after pwrmgm(true)", true);
     bbepInitIO(&bbep, globalConfig.displays[0].dc_pin, globalConfig.displays[0].reset_pin, globalConfig.displays[0].busy_pin, globalConfig.displays[0].cs_pin, globalConfig.displays[0].data_pin, globalConfig.displays[0].clk_pin, 8000000);
+    writeSerial("[+" + String(millis() - t0) + "ms] after bbepInitIO", true);
     bbepWakeUp(&bbep);
+    writeSerial("[+" + String(millis() - t0) + "ms] after bbepWakeUp", true);
     const uint8_t* initSeq = bbep.pInitPart ? bbep.pInitPart : bbep.pInitFull;
     bbepSendCMDSequence(&bbep, initSeq);
+    writeSerial("[+" + String(millis() - t0) + "ms] after bbepSendCMDSequence", true);
     bbepFill(&bbep, BBEP_WHITE, PLANE_1);
+    writeSerial("[+" + String(millis() - t0) + "ms] after bbepFill PLANE_1", true);
     bbepFill(&bbep, BBEP_WHITE, PLANE_0);
+    writeSerial("[+" + String(millis() - t0) + "ms] after bbepFill PLANE_0", true);
 }
 
 static bool partial_write_to_panel(int refreshMode) {
@@ -2718,7 +2726,7 @@ static bool partial_write_to_panel(int refreshMode) {
     writeSerial(")", true);
 
     if (partialCtx.bytes_written != partialCtx.expected_stream_size) return false;
-    delay(20);
+//    delay(20);  THIS DELAY IS UNNEEDED 
     epdRefreshInProgress = true;
     bool refreshSuccess = partial_trigger_refresh(refreshMode);
     epdRefreshInProgress = false;
