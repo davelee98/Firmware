@@ -188,12 +188,17 @@ static uint32_t epdKeepAliveWindowMs(void) {
     return EPD_KEEPALIVE_MS;
 }
 
-// Cross-task try-lock. On nRF the SoftDevice BLE task and the loop() task can both
-// touch the session (a transfer begins Acquire on one while the keep-alive tick
-// fires ForceOff on the other). Acquire/Release/ForceOff take it (short spin); the
-// tick TRY-locks and skips its pass if held, so it can never rail-cut mid-init.
+// Cross-task try-lock. On nRF the Bluefruit write-callback task and the loop()
+// task can both touch the session (a transfer begins Acquire on one while the
+// keep-alive tick fires ForceOff on the other). Acquire/Release/ForceOff take it;
+// the tick TRY-locks and skips its pass if held, so it can never rail-cut mid-init.
 static void pwrmgmLockTake(void) {
-    while (__atomic_exchange_n(&pwrmgmLock, 1, __ATOMIC_ACQUIRE)) { /* spin */ }
+    // MUST yield while waiting: on nRF this runs on the Bluefruit callback task,
+    // which outranks the loop task holding the lock during the tick's ForceOff
+    // (SPI ops + delay(50)). A bare busy-spin starves the lower-priority holder
+    // forever on the single core (priority-inversion livelock); delay(1) is
+    // vTaskDelay, which blocks the spinner so the holder can finish and release.
+    while (__atomic_exchange_n(&pwrmgmLock, 1, __ATOMIC_ACQUIRE)) { delay(1); }
 }
 static bool pwrmgmLockTryTake(void) {
     return __atomic_exchange_n(&pwrmgmLock, 1, __ATOMIC_ACQUIRE) == 0;
@@ -1322,6 +1327,10 @@ void initDisplay(){
         seeed_gfx_epaper_begin();
         if (opnd_seeed_tcon_busy_timeout_occurred()) {
             writeSerial("Seeed_GFX init failed (TCON busy timeout) — skipping boot refresh", true);
+            // begin() sets seeed_gfx_hw_initialized=true even on TCON timeout; clear it
+            // so the next push takes the full begin() path. Raw pwrmgm(false) (not
+            // ForceOff): don't send sleep to a TCON that just timed out on BUSY.
+            seeed_gfx_mark_hw_deinitialized();
             pwrmgm(false);
             return;
         }
@@ -1338,7 +1347,9 @@ void initDisplay(){
             epdSessionForceOff();
             touchResumeAfterEpdRefresh();
         } else {
-            pwrmgm(false);
+            // CLEAR_ON_BOOT: begin() succeeded (hw flag true) but the rail is being
+            // cut — ForceOff sleeps the TCON, clears the hw flag, and cuts the rail.
+            epdSessionForceOff();
         }
     } else
 #endif
@@ -1370,7 +1381,9 @@ void initDisplay(){
             epdSessionForceOff();
             touchResumeAfterEpdRefresh();
         } else {
-            pwrmgm(false);
+            // CLEAR_ON_BOOT: initBbepPanelSession left the controller awake —
+            // ForceOff sleeps it before the rail cut (raw pwrmgm(false) skipped that).
+            epdSessionForceOff();
         }
     }
     }
