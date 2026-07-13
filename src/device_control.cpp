@@ -34,6 +34,8 @@ extern volatile bool buttonEventPending;
 extern volatile uint8_t lastChangedButtonIndex;
 void updatemsdata();
 void cleanupDirectWriteState(bool refreshDisplay);
+void cleanupPartialWriteOnDisconnect(void);
+void resetPipeWriteState(void);
 void sendResponse(uint8_t* response, uint16_t len);
 void writeSerial(String message, bool newLine = true);
 
@@ -84,6 +86,11 @@ void connect_callback(uint16_t conn_handle) {
     writeSerial("=== BLE CLIENT CONNECTED ===", true);
     rebootFlag = 0;
     updatemsdata();
+#ifdef TARGET_NRF
+    ble_nrf_log_link_params(conn_handle, "at connect");  // baseline (pre-negotiation)
+    // ble_nrf_request_fast_link(conn_handle);              // request 2M PHY + 251-octet DLE (disabled)
+    ble_nrf_arm_link_diag(conn_handle);                  // re-log once negotiation settles
+#endif
 }
 
 void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
@@ -92,6 +99,8 @@ void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
     writeSerial("=== BLE CLIENT DISCONNECTED ===", true);
     writeSerial("Disconnect reason: " + String(reason), true);
     cleanupDirectWriteState(true);
+    cleanupPartialWriteOnDisconnect();   // 0x76 / pipe-partial session bookkeeping + panel power
+    resetPipeWriteState();   // clear any pipe transfer + reorder queue on disconnect
 }
 
 void reboot(){

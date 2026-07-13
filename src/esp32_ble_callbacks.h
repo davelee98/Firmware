@@ -14,11 +14,14 @@
 // (0x0071) whose per-frame receive/queue logging should be suppressed.
 bool imageWriteLogQuietFrame(const uint8_t* data, uint16_t len);
 
+// Kept in sync with main.h (included first, so its values win). PIPE_WRITE ingest:
+// 33 slots hold a full W=32 window + END across a 60 s Spectra SPI stall; 256 covers
+// pipe <=244 / legacy <=232 / HA <=244.
 #ifndef COMMAND_QUEUE_SIZE
-#define COMMAND_QUEUE_SIZE 5
+#define COMMAND_QUEUE_SIZE 33
 #endif
 #ifndef MAX_COMMAND_SIZE
-#define MAX_COMMAND_SIZE 512
+#define MAX_COMMAND_SIZE 256
 #endif
 
 struct CommandQueueItem {
@@ -35,6 +38,8 @@ extern volatile bool esp32BleNotifySubscribed;
 
 void updatemsdata();
 void cleanupDirectWriteState(bool refreshDisplay);
+void cleanupPartialWriteOnDisconnect(void);
+void resetPipeWriteState(void);
 void touchResumeAfterEpdRefresh(void);
 extern volatile bool epdRefreshInProgress;
 extern bool directWriteActive;
@@ -53,9 +58,14 @@ class MyBLEServerCallbacks : public BLEServerCallbacks {
         esp32BleNotifySubscribed = false;
         if (epdRefreshInProgress) {
             writeSerial("EPD refresh in progress — deferring cleanup/advertising to main loop");
-        } else if (directWriteActive) {
-            cleanupDirectWriteState(true);
+        } else {
+            if (directWriteActive) cleanupDirectWriteState(true);
+            // Partial sessions (0x76 or pipe-partial) power the panel without
+            // setting directWriteActive; release it here instead of waiting on
+            // the 15-min partial watchdog.
+            cleanupPartialWriteOnDisconnect();
         }
+        resetPipeWriteState();   // clear any pipe transfer + reorder queue on disconnect
         bleRestartAdvertisingPending = true;
     }
 };
@@ -88,12 +98,16 @@ public:
                 }
                 writeSerial(hexDump);
             }
-            uint8_t nextHead = (commandQueueHead + 1) % COMMAND_QUEUE_SIZE;
-            if (nextHead != commandQueueTail) {
-                memcpy(commandQueue[commandQueueHead].data, data, len);
-                commandQueue[commandQueueHead].len = len;
-                commandQueue[commandQueueHead].pending = true;
-                commandQueueHead = nextHead;
+            // SPSC ring: publish head with RELEASE after the payload is fully written
+            // so the consumer (main loop) never observes a slot before its bytes land.
+            uint8_t head = __atomic_load_n(&commandQueueHead, __ATOMIC_RELAXED);
+            uint8_t tail = __atomic_load_n(&commandQueueTail, __ATOMIC_ACQUIRE);
+            uint8_t nextHead = (head + 1) % COMMAND_QUEUE_SIZE;
+            if (nextHead != tail) {
+                memcpy(commandQueue[head].data, data, len);
+                commandQueue[head].len = len;
+                commandQueue[head].pending = true;
+                __atomic_store_n(&commandQueueHead, nextHead, __ATOMIC_RELEASE);
                 if (!quiet) writeSerial("ESP32: Command queued for processing");
             } else {
                 writeSerial("ERROR: Command queue full, dropping command");
