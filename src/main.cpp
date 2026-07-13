@@ -260,7 +260,7 @@ static void flushResponseQueueToBle() {
 
 void loop() {
     processLedFlash();
-    epdSessionTick();   // millis()-poll: power the panel down 30 s after last release
+    epdSessionTick();   // millis()-poll: power the panel down screen_timeout_seconds after last release
     #ifdef TARGET_ESP32
     pollActivity();
     #endif
@@ -488,10 +488,11 @@ void enterDeepSleep(bool force, uint16_t overrideSleepSeconds) {
     // Panel power-down MUST sit below every early-return above (including the
     // min-wake hold): on mains (power_mode != 1) enterDeepSleep bails before here,
     // so a WARM panel stays warm and the keep-alive tick in idleDelay(2000) expires
-    // it at 30 s. On battery this is the routine WARM-at-idle-hold-expiry path
-    // (idle-hold default 10 s < 30 s keep-alive) and also closes the pre-existing
-    // "deep sleep never powers the panel down" hazard. Net effect on battery ESP32:
-    // effective keep-alive = min(30 s, idle-hold).
+    // it after the configured window. On battery this is the routine
+    // WARM-at-idle-hold-expiry path (idle-hold default 10 s often < the keep-alive
+    // window) and also closes the pre-existing "deep sleep never powers the panel
+    // down" hazard. Net effect on battery ESP32: effective keep-alive =
+    // min(configured window, idle-hold).
     epdSessionForceOff();
     woke_from_deep_sleep = true; // Will be true on next boot
     if (pServer != nullptr) {

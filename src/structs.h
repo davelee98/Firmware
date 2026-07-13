@@ -58,7 +58,10 @@ struct PowerOption {
     uint8_t charge_state_pin;       // BQ25616 charge-state GPIO (0 or 0xFF = unused)
     uint8_t charger_flags;          // bit0 enable active-low; bit1 state active-low when charging
     uint16_t min_wake_time_seconds; // Min awake window after first boot or button wake; 0 = default 120 s
-    uint8_t reserved[5];
+    uint8_t screen_timeout_seconds; // EPD keep-alive: seconds panel stays powered (WARM) after a
+                                    // refresh before shutdown. Clamped to 30 max; 0 = power off
+                                    // immediately after refresh (default; matches pre-session behavior)
+    uint8_t reserved[4];
 } __attribute__((packed));
 
 #define CHARGER_FLAG_ENABLE_ACTIVE_LOW (1u << 0)

@@ -42,7 +42,7 @@ extern bool connectionRequested;
 extern uint8_t mloopcounter;
 extern bool displayPowerState;
 // EPD panel power state machine — variables DEFINED in main.h TU; enum +
-// EPD_KEEPALIVE_MS live in display_service.h.
+// EPD_KEEPALIVE_MAX_S live in display_service.h.
 extern volatile uint8_t pwrmgmState;
 extern uint32_t pwrmgmOffDeadlineMs;
 extern volatile uint8_t pwrmgmLock;
@@ -179,13 +179,22 @@ static bool epdSessionUsesSeeed(void) {
 #endif
 }
 
-// Keep-alive window. Forced to 0 on AXP2101 boards (PMIC idle draw unmeasured) —
-// Release powers the panel straight down there. Same sensor scan pwrmgm() uses.
+// Keep-alive window from config: screen_timeout_seconds, clamped to EPD_KEEPALIVE_MAX_S;
+// 0 (also the old-blob/factory default) -> Release powers the panel straight down.
+// Forced to 0 on AXP2101 boards regardless of config (PMIC warm idle draw unmeasured) —
+// announced on the log whenever the override suppresses a non-zero configured value.
 static uint32_t epdKeepAliveWindowMs(void) {
+    uint8_t s = globalConfig.power_option.screen_timeout_seconds;
     for (uint8_t i = 0; i < globalConfig.sensor_count; i++) {
-        if (globalConfig.sensors[i].sensor_type == SENSOR_TYPE_AXP2101) return 0;
+        if (globalConfig.sensors[i].sensor_type == SENSOR_TYPE_AXP2101) {
+            if (s != 0) {
+                writeSerial("[EPD session] AXP2101 present - keep-alive forced off (screen_timeout_seconds ignored)", true);
+            }
+            return 0;
+        }
     }
-    return EPD_KEEPALIVE_MS;
+    if (s > EPD_KEEPALIVE_MAX_S) s = EPD_KEEPALIVE_MAX_S;
+    return (uint32_t)s * 1000;
 }
 
 // Cross-task try-lock. On nRF the Bluefruit write-callback task and the loop()

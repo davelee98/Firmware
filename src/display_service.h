@@ -13,7 +13,7 @@
 // DEFINED in main.h next to displayPowerState and externed in display_service.cpp.
 // PWR_OFF must be 0: BSS-zero after boot / ESP32 deep-sleep wake == rail off.
 enum PwrMgmState : uint8_t { PWR_OFF = 0, PWR_WARM = 1, PWR_ACTIVE = 2 };
-#define EPD_KEEPALIVE_MS 30000   // keep-alive window (ms); bounded, hard cap ~60 s
+#define EPD_KEEPALIVE_MAX_S 30   // hard cap on power_option.screen_timeout_seconds (clamped, not rejected)
 
 // EPD panel power session (keep-alive) cross-TU API. Acquire/Release are
 // file-static in display_service.cpp (they own the ACTIVE<->WARM transitions and

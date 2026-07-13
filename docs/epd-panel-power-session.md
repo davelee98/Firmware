@@ -49,7 +49,7 @@ legacy mirror), with the enum + constant in the shared header
 
 ```c
 enum PwrMgmState : uint8_t { PWR_OFF = 0, PWR_WARM = 1, PWR_ACTIVE = 2 };
-#define EPD_KEEPALIVE_MS 30000
+#define EPD_KEEPALIVE_MAX_S 30   // hard cap on power_option.screen_timeout_seconds
 
 volatile uint8_t pwrmgmState      = PWR_OFF;  // single source of truth
 uint32_t         pwrmgmOffDeadlineMs = 0;     // keep-alive deadline (valid only in WARM)
@@ -235,8 +235,60 @@ existing watchdog idiom and, critically, keeps all panel SPI work on the loop ta
 pwrmgmOffDeadlineMs = millis() + epdKeepAliveWindowMs();
 pwrmgmState = PWR_WARM;
 ```
-`epdKeepAliveWindowMs()` returns `EPD_KEEPALIVE_MS` (30 s), or **0** on boards with
-an AXP2101 PMIC — there the panel powers straight down (idle draw unmeasured).
+
+`epdKeepAliveWindowMs()` sources the window from config rather than a hardcoded
+constant:
+```c
+static uint32_t epdKeepAliveWindowMs(void) {
+    uint8_t s = globalConfig.power_option.screen_timeout_seconds;
+    for (uint8_t i = 0; i < globalConfig.sensor_count; i++) {
+        if (globalConfig.sensors[i].sensor_type == SENSOR_TYPE_AXP2101) {
+            if (s != 0) {
+                writeSerial("[EPD session] AXP2101 present - keep-alive forced off (screen_timeout_seconds ignored)", true);
+            }
+            return 0;
+        }
+    }
+    if (s > EPD_KEEPALIVE_MAX_S) s = EPD_KEEPALIVE_MAX_S;
+    return (uint32_t)s * 1000;
+}
+```
+- **Source:** `PowerOption.screen_timeout_seconds` (uint8, seconds) — the number of
+  seconds the panel stays powered (`PWR_WARM`) after a successful refresh.
+- **Clamp:** the value is clamped to `EPD_KEEPALIVE_MAX_S` (30), so the effective
+  window is `min(30, configured) × 1000 ms`. Out-of-range values are clamped, not
+  rejected.
+- **0 = immediate off, and is the default.** When the field is 0, `epdSessionRelease`
+  takes the `window == 0` branch and powers the panel straight down after the
+  refresh — no keep-alive. Old persisted config blobs and factory defaults carry 0
+  in the reserved bytes, so existing devices keep `main`'s shipped immediate-off
+  behavior until the field is explicitly set.
+- **AXP2101 override (retained):** on boards with an AXP2101 PMIC (warm idle draw
+  unmeasured) the window is forced to 0 regardless of config, so the panel powers
+  straight down. The override checks the sensor list before the clamp and now
+  announces itself — but only when it actually suppresses a non-zero configured
+  value:
+  ```
+  [EPD session] AXP2101 present - keep-alive forced off (screen_timeout_seconds ignored)
+  ```
+  On an AXP2101 board left at the 0 default nothing is being suppressed, so the log
+  stays quiet; with a non-zero config it logs once per release (i.e. once per push).
+
+### Live-disable hardening (config reload)
+Because a warm panel arms its deadline from the value in effect *at release time*, a
+config write that sets `screen_timeout_seconds = 0` would otherwise not take effect
+until the stale deadline (≤30 s) expired. `reloadConfigAfterSave()`
+([communication.cpp](../src/communication.cpp)) closes this: after a successful
+reload, if keep-alive is now disabled and the panel is still warm, it force-offs the
+panel immediately:
+```c
+if (globalConfig.power_option.screen_timeout_seconds == 0 && epdSessionIsWarm()) {
+    epdSessionForceOff();
+}
+```
+The force-off is conditional (only when the new value is 0 and the panel is warm), so
+a normal config save on a warm panel is left untouched. A *shortened* non-zero value
+simply applies from the next release; the residual (≤30 s) is not re-clamped live.
 
 ### Firing
 `epdSessionTick()` is called from two places in [main.cpp](../src/main.cpp):
@@ -284,8 +336,8 @@ true, blocking the idle branch). The permutations:
 | State at sleep decision | Outcome |
 |---|---|
 | `PWR_OFF` | `enterDeepSleep`'s `epdSessionForceOff()` is a no-op; sleeps as before |
-| `PWR_WARM`, battery | idle-hold (default 10 s) expires before the 30 s window → `enterDeepSleep` runs `ForceOff` (below its early-returns), cleanly sleeping the panel before the MCU sleeps. Effective keep-alive = min(30 s, idle-hold) |
-| `PWR_WARM`, mains | `enterDeepSleep` early-returns *above* the `ForceOff`; panel stays warm; the tick in `idleDelay(2000)` expires it at 30 s |
+| `PWR_WARM`, battery | idle-hold (default 10 s) typically expires before the configured keep-alive window → `enterDeepSleep` runs `ForceOff` (below its early-returns), cleanly sleeping the panel before the MCU sleeps. Effective keep-alive = min(keep-alive window, idle-hold) |
+| `PWR_WARM`, mains | `enterDeepSleep` early-returns *above* the `ForceOff`; panel stays warm; the tick in `idleDelay(2000)` expires it at the configured keep-alive window (`screen_timeout_seconds`, ≤30 s) |
 | `PWR_ACTIVE` | unreachable — a transfer/connection keeps `workInFlight` true |
 | wake from deep sleep | RAM zeroed → `PWR_OFF` (enum value 0 correct); rail physically off; first push pays a cold acquire. `displayed_etag` (RTC-persisted) still gates partials |
 
@@ -304,7 +356,8 @@ closes a pre-existing hazard where deep sleep never powered the panel down.
 | **Warm, full-frame partial** | 1586 ms | **~47 ms** (wake + init seq only) |
 | Warm, sub-rect partial | 1586 ms | ~615 ms (fills still run) |
 
-Plus: disconnect within 30 s reconnects onto a warm panel; `waitforrefresh` returns
+Plus: disconnect within the keep-alive window (`screen_timeout_seconds`, ≤30 s)
+reconnects onto a warm panel; `waitforrefresh` returns
 up to ~90 ms sooner; BLE transfer phase 2–4× faster on peers that honour the
 PHY/DLE upgrade.
 
@@ -332,5 +385,5 @@ under `.pio/libdeps/` (bb_epaper) was modified.
   and the 800 ms rail-settle reduction. Out of scope here (libdep / hardware).
 
 **Known residual behavior:** a hard decode error mid-START leaves the panel `PWR_WARM`
-(released via `cleanupDirectWriteState(false)`) until the 30 s tick or the next push;
+(released via `cleanupDirectWriteState(false)`) until the keep-alive window's tick or the next push;
 this is safe and self-recovers.

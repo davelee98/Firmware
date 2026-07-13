@@ -92,9 +92,17 @@ config blob (LittleFS-persisted), not NVS.
 | Deep sleep duration | `PowerOption.deep_sleep_time_seconds` (`structs.h:56`, uint16) | 0 = disabled | Timer wake interval |
 | Idle quiet window ("stay awake") | `PowerOption.sleep_timeout_ms` (`structs.h:47`, uint16 ms) | 0 → `DEFAULT_IDLE_HOLD_MS` | Quiet time before sleeping; also the post-wake advertising window length |
 | Idle hold fallback | `DEFAULT_IDLE_HOLD_MS` (`main.h:325`) | 10 000 ms | Fallback when `sleep_timeout_ms == 0` |
+| EPD keep-alive window | `PowerOption.screen_timeout_seconds` (`structs.h:61`, uint8 s) | 0 = off | Seconds the e-paper panel stays powered (`PWR_WARM`) after a refresh before shutdown; clamped to 30 s max (`EPD_KEEPALIVE_MAX_S`), 0 = power off immediately after refresh. Forced to 0 on AXP2101 boards regardless of config. See `docs/epd-panel-power-session.md` §4 |
 | First-boot holdoff | `FIRST_BOOT_DEEP_SLEEP_DELAY_MS` (`main.h:328`) | 120 000 ms | Cold-boot grace period before first sleep (gated by `deep_sleep_count == 0`) |
 | Direct-write timeout | inline `main.cpp:293` | 900 000 ms | PIPE/direct-write session timeout |
 | Power-off long-press | `POWER_OFF_HOLD_MS` (`power_latch.cpp:21`) | 3 000 ms | Latch shutdown hold |
+
+On a battery ESP32 the EPD keep-alive window and the idle-hold interact: because
+`enterDeepSleep()` always calls `epdSessionForceOff()` (placed after its
+early-returns), the panel is powered down when the MCU sleeps, so the effective warm
+time is `min(keep-alive window, idle-hold)`. With the default 10 s idle-hold a keep-
+alive window longer than that is cut short by deep sleep; `epdSessionForceOff()` is
+idempotent, so either timer firing first is safe.
 
 Runtime/RTC state: `RTC_DATA_ATTR bool woke_from_deep_sleep` (`main.h:312`),
 `RTC_DATA_ATTR uint32_t deep_sleep_count` (`main.h:313`),
