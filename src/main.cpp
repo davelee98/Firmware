@@ -468,12 +468,10 @@ void fullSetupAfterConnection() {
 void enterDeepSleep(bool force, uint16_t overrideSleepSeconds) {
     if (globalConfig.power_option.power_mode != 1) {
         writeSerial("Skipping deep sleep - not battery powered (power_mode: " + String(globalConfig.power_option.power_mode) + ")");
-        delay(2000);
         return;
     }
     if (globalConfig.power_option.deep_sleep_time_seconds == 0) {
         writeSerial("Skipping deep sleep - deep_sleep_time_seconds is 0");
-        delay(2000);
         return;
     }
     // Callers sample their idle state before getting here; a central can connect in
