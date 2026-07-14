@@ -22,6 +22,7 @@ extern BLEServer* pServer;
 
 void writeSerial(String message, bool newLine = true);
 bool isAuthenticated();
+extern struct GlobalConfig globalConfig;
 
 static void reloadConfigAfterSave(void) {
     if (!loadGlobalConfig()) {
@@ -30,6 +31,11 @@ static void reloadConfigAfterSave(void) {
         return;
     }
     writeSerial("Config reloaded from storage after save");
+    // Live-disable takes effect now: with keep-alive off, drop a still-warm panel
+    // here instead of waiting out the stale (<=30 s) deadline armed by the last push.
+    if (globalConfig.power_option.screen_timeout_seconds == 0 && epdSessionIsWarm()) {
+        epdSessionForceOff();
+    }
     clearEncryptionSession();
 #ifdef TARGET_ESP32
     initWiFi();
@@ -52,7 +58,6 @@ typedef struct {
 extern chunked_write_state_t chunkedWriteState;
 extern uint8_t configReadResponseBuffer[128];
 extern uint8_t msd_payload[16];
-extern struct GlobalConfig globalConfig;
 String getChipIdHex();
 float readBatteryVoltage();
 

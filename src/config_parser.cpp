@@ -683,6 +683,7 @@ void printConfigSummary(){
     writeSerial("TX Power: " + String(globalConfig.power_option.tx_power));
     writeSerial("Sleep Flags: 0x" + String(globalConfig.power_option.sleep_flags, HEX));
     writeSerial("Button Wake: " + String((globalConfig.power_option.sleep_flags & SLEEP_FLAG_BUTTON_WAKE_DISABLE) ? "disabled" : "enabled") + " (sleep_flags bit0)");
+    writeSerial("Screen Timeout: " + String(globalConfig.power_option.screen_timeout_seconds) + " s (EPD keep-alive; 0 = off immediately after refresh)");
     writeSerial("Battery Sense Pin: " + String(globalConfig.power_option.battery_sense_pin));
     writeSerial("Battery Sense Enable Pin: " + String(globalConfig.power_option.battery_sense_enable_pin));
     writeSerial("Battery Sense Flags: 0x" + String(globalConfig.power_option.battery_sense_flags, HEX));

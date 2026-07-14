@@ -261,6 +261,7 @@ static void flushResponseQueueToBle() {
 
 void loop() {
     processLedFlash();
+    epdSessionTick();   // millis()-poll: power the panel down screen_timeout_seconds after last release
     buzzerService();
     #ifdef TARGET_ESP32
     pollActivity();
@@ -434,6 +435,7 @@ void idleDelay(uint32_t delayMs) {
         processButtonEvents();
         processTouchInput();
         processLedFlash();
+        epdSessionTick();   // expire the keep-alive window while a long idleDelay blocks
         buzzerService();
         uint32_t chunkDelay = (remainingDelay > CHECK_INTERVAL_MS) ? CHECK_INTERVAL_MS : remainingDelay;
         delay(chunkDelay);
@@ -466,12 +468,10 @@ void fullSetupAfterConnection() {
 void enterDeepSleep(bool force, uint16_t overrideSleepSeconds) {
     if (globalConfig.power_option.power_mode != 1) {
         writeSerial("Skipping deep sleep - not battery powered (power_mode: " + String(globalConfig.power_option.power_mode) + ")");
-        delay(2000);
         return;
     }
     if (globalConfig.power_option.deep_sleep_time_seconds == 0) {
         writeSerial("Skipping deep sleep - deep_sleep_time_seconds is 0");
-        delay(2000);
         return;
     }
     // Callers sample their idle state before getting here; a central can connect in
@@ -489,6 +489,15 @@ void enterDeepSleep(bool force, uint16_t overrideSleepSeconds) {
         writeSerial("Skipping deep sleep - minimum wake window active");
         return;
     }
+    // Panel power-down MUST sit below every early-return above (including the
+    // min-wake hold): on mains (power_mode != 1) enterDeepSleep bails before here,
+    // so a WARM panel stays warm and the keep-alive tick in idleDelay(2000) expires
+    // it after the configured window. On battery this is the routine
+    // WARM-at-idle-hold-expiry path (idle-hold default 10 s often < the keep-alive
+    // window) and also closes the pre-existing "deep sleep never powers the panel
+    // down" hazard. Net effect on battery ESP32: effective keep-alive =
+    // min(configured window, idle-hold).
+    epdSessionForceOff();
     woke_from_deep_sleep = true; // Will be true on next boot
     if (pServer != nullptr) {
         BLEAdvertising *pAdvertising = pServer->getAdvertising();
@@ -555,7 +564,16 @@ void pwrmgm(bool onoff){
         writeSerial("No display configured");
         return;
     }
+    // Idempotency guard keyed on the panel power state machine (the single source
+    // of truth). Makes every legacy caller safe: a same-state call becomes a no-op,
+    // while a real transition (true-after-false, or the boot true/false/true rail
+    // cycle) always proceeds because each call flips the state. pwrmgm owns the
+    // OFF<->(ACTIVE) transitions; epdSessionAcquire/Release own ACTIVE<->WARM.
+    if (onoff  && pwrmgmState != PWR_OFF) return;   // already powered (WARM or ACTIVE)
+    if (!onoff && pwrmgmState == PWR_OFF) return;   // already off
     displayPowerState = onoff;
+    pwrmgmState = onoff ? PWR_ACTIVE : PWR_OFF;
+    if (!onoff) pwrmgmOffDeadlineMs = 0;
     uint8_t axp2101_bus_id = 0xFF;
     bool axp2101_found = false;
     for(uint8_t i = 0; i < globalConfig.sensor_count; i++){

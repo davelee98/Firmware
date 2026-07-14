@@ -88,7 +88,7 @@ void connect_callback(uint16_t conn_handle) {
     updatemsdata();
 #ifdef TARGET_NRF
     ble_nrf_log_link_params(conn_handle, "at connect");  // baseline (pre-negotiation)
-    // ble_nrf_request_fast_link(conn_handle);              // request 2M PHY + 251-octet DLE (disabled)
+    ble_nrf_request_fast_link(conn_handle);              // request 2M PHY + 251-octet DLE
     ble_nrf_arm_link_diag(conn_handle);                  // re-log once negotiation settles
 #endif
 }
@@ -98,6 +98,11 @@ void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
     (void)reason;
     writeSerial("=== BLE CLIENT DISCONNECTED ===", true);
     writeSerial("Disconnect reason: " + String(reason), true);
+    // Panel power on disconnect follows the ACTIVE-only-teardown invariant, so no
+    // logic change is needed here: a WARM (post-successful-refresh) panel SURVIVES
+    // disconnect and keeps its keep-alive window — a reconnect within the window
+    // pays only a warm re-acquire. Only a disconnect mid-transfer (still PWR_ACTIVE) tears the
+    // panel down, via the cleanup calls below (which no-op on power when WARM).
     cleanupDirectWriteState(true);
     cleanupPartialWriteOnDisconnect();   // 0x76 / pipe-partial session bookkeeping + panel power
     resetPipeWriteState();   // clear any pipe transfer + reorder queue on disconnect

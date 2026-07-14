@@ -41,6 +41,11 @@ extern uint8_t activeLedInstance;
 extern bool connectionRequested;
 extern uint8_t mloopcounter;
 extern bool displayPowerState;
+// EPD panel power state machine — variables DEFINED in main.h TU; enum +
+// EPD_KEEPALIVE_MAX_S live in display_service.h.
+extern volatile uint8_t pwrmgmState;
+extern uint32_t pwrmgmOffDeadlineMs;
+extern volatile uint8_t pwrmgmLock;
 extern uint32_t directWriteStartTime;
 extern uint32_t directWriteCompressedReceived;
 extern uint8_t directWriteRefreshMode;
@@ -150,6 +155,165 @@ static void initBbepPanelSession() {
     bbepWakeUp(&bbep);
     bbepSendCMDSequence(&bbep, bbep.pInitFull);
     delay(200);
+}
+
+// ---------------------------------------------------------------------------
+// EPD panel power session (keep-alive) — see the state-machine design.
+// pwrmgm() owns the OFF<->(ACTIVE) rail transitions and is the sole rail actuator;
+// these helpers own the ACTIVE<->WARM transitions plus the keep-alive timer.
+// ---------------------------------------------------------------------------
+
+// Which init sequence is loaded in the controller (partial vs full). Panel-init
+// bookkeeping, not power state — stays file-static here (Phase 2a uses it).
+static bool epdSessionInitWasPartial = false;
+// Phase 2b plane-consistency flag: true after a successful partial refresh leaves
+// both controller planes consistent. Cleared on ForceOff / full-frame acquire.
+// Not consulted for fill-skip in Phase 1 (full-frame skip is unconditional-safe).
+static bool epdPlanesPrepared = false;
+
+static bool epdSessionUsesSeeed(void) {
+#if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
+    return seeed_driver_used();
+#else
+    return false;
+#endif
+}
+
+// Keep-alive window from config: screen_timeout_seconds, clamped to EPD_KEEPALIVE_MAX_S;
+// 0 (also the old-blob/factory default) -> Release powers the panel straight down.
+// Forced to 0 on AXP2101 boards regardless of config (PMIC warm idle draw unmeasured) —
+// announced on the log whenever the override suppresses a non-zero configured value.
+static uint32_t epdKeepAliveWindowMs(void) {
+    uint8_t s = globalConfig.power_option.screen_timeout_seconds;
+    for (uint8_t i = 0; i < globalConfig.sensor_count; i++) {
+        if (globalConfig.sensors[i].sensor_type == SENSOR_TYPE_AXP2101) {
+            if (s != 0) {
+                writeSerial("[EPD session] AXP2101 present - keep-alive forced off (screen_timeout_seconds ignored)", true);
+            }
+            return 0;
+        }
+    }
+    if (s > EPD_KEEPALIVE_MAX_S) s = EPD_KEEPALIVE_MAX_S;
+    return (uint32_t)s * 1000;
+}
+
+// Cross-task try-lock. On nRF the Bluefruit write-callback task and the loop()
+// task can both touch the session (a transfer begins Acquire on one while the
+// keep-alive tick fires ForceOff on the other). Acquire/Release/ForceOff take it;
+// the tick TRY-locks and skips its pass if held, so it can never rail-cut mid-init.
+static void pwrmgmLockTake(void) {
+    // MUST yield while waiting: on nRF this runs on the Bluefruit callback task,
+    // which outranks the loop task holding the lock during the tick's ForceOff
+    // (SPI ops + delay(50)). A bare busy-spin starves the lower-priority holder
+    // forever on the single core (priority-inversion livelock); delay(1) is
+    // vTaskDelay, which blocks the spinner so the holder can finish and release.
+    while (__atomic_exchange_n(&pwrmgmLock, 1, __ATOMIC_ACQUIRE)) { delay(1); }
+}
+static bool pwrmgmLockTryTake(void) {
+    return __atomic_exchange_n(&pwrmgmLock, 1, __ATOMIC_ACQUIRE) == 0;
+}
+static void pwrmgmLockGive(void) {
+    __atomic_store_n(&pwrmgmLock, 0, __ATOMIC_RELEASE);
+}
+
+// Lock-held core (callers must hold pwrmgmLock). Split out so Release/Tick can
+// power off without re-taking the non-recursive lock.
+static void epdSessionForceOffLocked(void) {
+    if (pwrmgmState == PWR_OFF) return;   // idempotent
+    writeSerial("[EPD session] force off", true);
+    if (epdSessionUsesSeeed()) {
+#if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
+        seeed_gfx_direct_sleep();
+        // Rail is about to drop: force the next push to fully re-init the TCON
+        // rather than wake() a power-cycled IT8951 (garbled refresh otherwise).
+        seeed_gfx_mark_hw_deinitialized();
+#endif
+    } else {
+        bbepSleep(&bbep, 1);
+        delay(50);
+    }
+    pwrmgm(false);   // -> PWR_OFF, clears deadline
+    epdPlanesPrepared = false;
+}
+
+// Bring the panel up for a transfer/refresh. Returns true iff it was COLD (rail
+// was off) — callers may need to (re)open the address window regardless.
+static bool epdSessionAcquire(bool partialInit) {
+    pwrmgmLockTake();
+    bool cold;
+    if (pwrmgmState == PWR_OFF) {
+        writeSerial("[EPD session] acquire: COLD bring-up", true);
+        pwrmgm(true);   // -> PWR_ACTIVE (guarded; real transition)
+        if (!epdSessionUsesSeeed()) {
+            const DisplayConfig& d = globalConfig.displays[0];
+            bbepInitIO(&bbep, d.dc_pin, d.reset_pin, d.busy_pin, d.cs_pin, d.data_pin, d.clk_pin, 8000000);
+            bbepWakeUp(&bbep);
+            const uint8_t* initSeq = partialInit ? (bbep.pInitPart ? bbep.pInitPart : bbep.pInitFull)
+                                                 : bbep.pInitFull;
+            bbepSendCMDSequence(&bbep, initSeq);
+            epdSessionInitWasPartial = partialInit;
+        }
+        cold = true;
+    } else {
+        // WARM re-acquire (or, defensively, an already-ACTIVE re-entry).
+        writeSerial(pwrmgmState == PWR_ACTIVE ? "[EPD session] acquire: already ACTIVE (defensive)"
+                                              : "[EPD session] acquire: WARM re-acquire", true);
+        pwrmgmState = PWR_ACTIVE;
+        pwrmgmOffDeadlineMs = 0;   // cancel keep-alive
+        // Phase 1: full re-init on warm re-acquire (HW reset => registers identical
+        // to cold, safest). Phase 2a will skip bbepWakeUp + resend only on change.
+        if (!epdSessionUsesSeeed()) {
+            bbepWakeUp(&bbep);
+            const uint8_t* initSeq = partialInit ? (bbep.pInitPart ? bbep.pInitPart : bbep.pInitFull)
+                                                 : bbep.pInitFull;
+            bbepSendCMDSequence(&bbep, initSeq);
+            epdSessionInitWasPartial = partialInit;
+        }
+        cold = false;
+    }
+    pwrmgmLockGive();
+    return cold;
+}
+
+// Finish a transfer/refresh. On success (and when keep-alive is enabled) the panel
+// stays powered + AWAKE and enters PWR_WARM with an armed deadline; otherwise it is
+// powered fully down now.
+static void epdSessionRelease(bool refreshSuccess) {
+    pwrmgmLockTake();
+    if (pwrmgmState == PWR_OFF) { pwrmgmLockGive(); return; }   // nothing to release
+    uint32_t window = epdKeepAliveWindowMs();
+    if (window == 0 || !refreshSuccess) {
+        writeSerial(refreshSuccess ? "[EPD session] release: keep-alive disabled, powering off"
+                                   : "[EPD session] release: refresh failed, powering off", true);
+        epdSessionForceOffLocked();
+    } else {
+        pwrmgmState = PWR_WARM;
+        pwrmgmOffDeadlineMs = millis() + window;
+        // Controller stays AWAKE (no bbepSleep; is_awake stays 1); rail/SPI stay up.
+        writeSerial("[EPD session] release: panel warm-idle, off in " + String(window) + " ms", true);
+    }
+    pwrmgmLockGive();
+}
+
+void epdSessionForceOff(void) {
+    pwrmgmLockTake();
+    epdSessionForceOffLocked();
+    pwrmgmLockGive();
+}
+
+void epdSessionTick(void) {
+    if (pwrmgmState != PWR_WARM) return;   // fast pre-check (only WARM arms the timer)
+    if (!pwrmgmLockTryTake()) return;      // held by a transfer -> skip this pass
+    // Re-check under the lock: a transfer may have moved us out of WARM meanwhile.
+    if (pwrmgmState == PWR_WARM && (int32_t)(millis() - pwrmgmOffDeadlineMs) >= 0) {
+        writeSerial("[EPD session] keep-alive expired — powering panel off", true);
+        epdSessionForceOffLocked();
+    }
+    pwrmgmLockGive();
+}
+
+bool epdSessionIsWarm(void) {
+    return pwrmgmState == PWR_WARM;
 }
 
 static bool refreshBootScreenFull() {
@@ -346,9 +510,13 @@ bool waitforrefresh(int timeout){
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
     if (seeed_driver_used()) return seeed_gfx_wait_refresh(timeout);
 #endif
-    for (size_t i = 0; i < (size_t)(timeout * 10); i++){
-        delay(100);
-        if(i % 5 == 0) writeSerial(".", false);
+    // Poll at 10 ms (was 100 ms) so a ~0.5 s refresh returns up to ~90 ms sooner.
+    // BUSY asserts within µs of MASTER_ACTIVATE, so the i==0 "never went busy"
+    // error check stays valid at a 10 ms first poll. Loop bound scales x10
+    // (timeout*100 iterations of 10 ms); dot cadence every 50 iters keeps ~0.5 s/dot.
+    for (size_t i = 0; i < (size_t)(timeout * 100); i++){
+        delay(10);
+        if(i % 50 == 0) writeSerial(".", false);
         if(!bbepIsBusy(&bbep)){
             if(i == 0){
                 writeSerial("ERROR: Epaper not busy after refresh command - refresh may not have started", true);
@@ -356,9 +524,9 @@ bool waitforrefresh(int timeout){
             }
             writeSerial(".", true);
             writeSerial("Refresh took ", false);
-            writeSerial((String)((float)i / 10), false);
+            writeSerial((String)((float)i / 100), false);
             writeSerial(" seconds", true);
-            delay(200);
+//            delay(200);   // EXTRA DELAY HERE IS UNNEEDED AND JUST SLOWS THINGS DOWN
             return true;
         }
     }
@@ -1159,6 +1327,10 @@ void initDisplay(){
         seeed_gfx_epaper_begin();
         if (opnd_seeed_tcon_busy_timeout_occurred()) {
             writeSerial("Seeed_GFX init failed (TCON busy timeout) — skipping boot refresh", true);
+            // begin() sets seeed_gfx_hw_initialized=true even on TCON timeout; clear it
+            // so the next push takes the full begin() path. Raw pwrmgm(false) (not
+            // ForceOff): don't send sleep to a TCON that just timed out on BUSY.
+            seeed_gfx_mark_hw_deinitialized();
             pwrmgm(false);
             return;
         }
@@ -1170,12 +1342,14 @@ void initDisplay(){
             touchSuspendForEpdRefresh();
             seeed_gfx_full_update();
             waitforrefresh(60);
-            seeed_gfx_sleep_after_refresh();
-            delay(200);
-            pwrmgm(false);
+            // Boot ends PWR_OFF (no keep-alive at boot). ForceOff sleeps the TCON
+            // (+ clears the Seeed hw-init flag, Commit 5) and cuts the rail.
+            epdSessionForceOff();
             touchResumeAfterEpdRefresh();
         } else {
-            pwrmgm(false);
+            // CLEAR_ON_BOOT: begin() succeeded (hw flag true) but the rail is being
+            // cut — ForceOff sleeps the TCON, clears the hw flag, and cuts the rail.
+            epdSessionForceOff();
         }
     } else
 #endif
@@ -1202,12 +1376,14 @@ void initDisplay(){
             if (!bootOk) {
                 writeSerial("Boot screen refresh did not complete", true);
             }
-            bbepSleep(&bbep, 1);
-            delay(200);
-            pwrmgm(false);
+            // Boot ends PWR_OFF (no keep-alive at boot). pwrmgm(true) in boot set
+            // PWR_ACTIVE, so ForceOff sleeps the controller + cuts the rail cleanly.
+            epdSessionForceOff();
             touchResumeAfterEpdRefresh();
         } else {
-            pwrmgm(false);
+            // CLEAR_ON_BOOT: initBbepPanelSession left the controller awake —
+            // ForceOff sleeps it before the rail cut (raw pwrmgm(false) skipped that).
+            epdSessionForceOff();
         }
     }
     }
@@ -1549,19 +1725,15 @@ void cleanupDirectWriteState(bool refreshDisplay) {
     directWriteTotalBytes = 0;
     directWriteRefreshMode = 0;
     directWriteStartTime = 0;
-    if (refreshDisplay && displayPowerState) {
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
-        if (seeed_driver_used()) {
-            seeed_gfx_direct_sleep();
-        } else
-#endif
-        {
-            bbepSleep(&bbep, 1);
-        }
-        delay(200);
+    // Panel power acts only while a transfer/refresh is actually in flight
+    // (PWR_ACTIVE). refreshDisplay==true is a terminal teardown (disconnect,
+    // 15-min timeout, mid-stream error) -> power fully off. refreshDisplay==false
+    // is the post-refresh path from directWriteFinishAndRefresh -> release to WARM
+    // so keep-alive holds the rail for the next push.
+    if (pwrmgmState == PWR_ACTIVE) {
+        if (refreshDisplay) epdSessionForceOff();
+        else                epdSessionRelease(true);
     }
-    displayPowerState = false;
-    pwrmgm(false);
     if (directWriteTouchSuspended) {
         touchResumeAfterEpdRefresh();
         directWriteTouchSuspended = false;
@@ -1606,20 +1778,18 @@ static void directWriteActivatePanel(void) {
     directWriteBytesWritten = 0;
     directWriteStartTime = millis();
     imageWriteLogStart(directWriteTotalBytes);
-    if (displayPowerState) {
-        pwrmgm(false);
-        delay(50);
-    }
-    pwrmgm(true);
+    // Full-frame write: acquire the session with the FULL init sequence. A warm
+    // re-acquire skips the ~900 ms rail bring-up + bbepInitIO (replaces the old
+    // force power-cycle, which under keep-alive would fire on every push). A
+    // full-frame direct write does not preserve partial plane consistency.
+    epdSessionAcquire(false);
+    epdPlanesPrepared = false;
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
     if (seeed_driver_used()) {
         seeed_gfx_direct_write_reset();
     } else
 #endif
     {
-        bbepInitIO(&bbep, globalConfig.displays[0].dc_pin, globalConfig.displays[0].reset_pin, globalConfig.displays[0].busy_pin, globalConfig.displays[0].cs_pin, globalConfig.displays[0].data_pin, globalConfig.displays[0].clk_pin, 8000000);
-        bbepWakeUp(&bbep);
-        bbepSendCMDSequence(&bbep, bbep.pInitFull);
         bbepSetAddrWindow(&bbep, 0, 0, globalConfig.displays[0].pixel_width, globalConfig.displays[0].pixel_height);
         bbepStartWrite(&bbep, directWriteBitplanes ? PLANE_0 : getplane());
     }
@@ -1916,10 +2086,10 @@ static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t end
     {
         bbepRefresh(&bbep, refreshMode);
         refreshSuccess = waitforrefresh(60);
-        bbepSleep(&bbep, 1);
+        // No bbepSleep here: cleanupDirectWriteState(false) releases the session,
+        // keeping the controller awake + rail up when keep-alive holds it warm.
     }
     epdRefreshInProgress = false;
-    delay(50);
     cleanupDirectWriteState(false);
 #ifdef TARGET_ESP32
     esp32_restart_ble_advertising();
@@ -2434,14 +2604,13 @@ void handlePipeWriteEnd(uint8_t* data, uint16_t len) {
 }
 
 static void cleanup_partial_write_state(void) {
-    bool powerDown = partialCtx.active && displayPowerState;
+    // Tear the panel down only when a transfer/refresh is actually in flight
+    // (PWR_ACTIVE) — i.e. on error / NACK / disconnect-mid-stream / watchdog. After
+    // a successful refresh, epdSessionRelease already moved to PWR_WARM, so
+    // post-success cleanups become bookkeeping-only and leave keep-alive running.
+    bool teardown = partialCtx.active && pwrmgmState == PWR_ACTIVE;
     memset(&partialCtx, 0, sizeof(partialCtx));
-    if (powerDown) {
-        bbepSleep(&bbep, 1);
-        delay(200);
-        displayPowerState = false;
-        pwrmgm(false);
-    }
+    if (teardown) epdSessionForceOff();
 }
 
 static bool panel_skips_bbep_set_addr_window(void) {
@@ -2685,16 +2854,29 @@ static bool partial_trigger_refresh(int refreshMode) {
 }
 
 static void partial_prepare_panel_ram(void) {
-    writeSerial("EPD partial start: auto-fill panel RAM", true);
-    if (!displayPowerState) {
-        pwrmgm(true);
+    // Delta in ms since function entry, to profile where prep wall-clock goes.
+    uint32_t t0 = millis();
+    writeSerial("[+" + String(millis() - t0) + "ms] EPD partial start: acquire panel session", true);
+    // Acquire subsumes pwrmgm(true) + bbepInitIO + bbepWakeUp + init-seq resend.
+    // Warm re-acquire skips the ~900 ms rail bring-up + bbepInitIO (Phase 1).
+    bool cold = epdSessionAcquire(true);
+    writeSerial("[+" + String(millis() - t0) + "ms] after epdSessionAcquire (" +
+                String(cold ? "cold" : "warm") + ")", true);
+    // The two white fills guarantee PLANE_0 == PLANE_1 OUTSIDE the rect so uninit
+    // controller RAM can't flash noise during MASTER_ACTIVATE. A full-frame rect's
+    // enforced plane_size*2 stream overwrites 100% of both planes, so there is no
+    // "outside the rect" to protect — provably safe to skip even on a cold panel
+    // (Phase 1 skip condition 1). Sub-rects still fill.
+    bool fullFrame = partialCtx.x == 0 && partialCtx.y == 0 &&
+                     partialCtx.width  == globalConfig.displays[0].pixel_width &&
+                     partialCtx.height == globalConfig.displays[0].pixel_height;
+    if (!fullFrame) {
+        bbepFill(&bbep, BBEP_WHITE, PLANE_1);
+        bbepFill(&bbep, BBEP_WHITE, PLANE_0);
+        writeSerial("[+" + String(millis() - t0) + "ms] after fills (ran: sub-rect)", true);
+    } else {
+        writeSerial("[+" + String(millis() - t0) + "ms] fills skipped (full-frame rect)", true);
     }
-    bbepInitIO(&bbep, globalConfig.displays[0].dc_pin, globalConfig.displays[0].reset_pin, globalConfig.displays[0].busy_pin, globalConfig.displays[0].cs_pin, globalConfig.displays[0].data_pin, globalConfig.displays[0].clk_pin, 8000000);
-    bbepWakeUp(&bbep);
-    const uint8_t* initSeq = bbep.pInitPart ? bbep.pInitPart : bbep.pInitFull;
-    bbepSendCMDSequence(&bbep, initSeq);
-    bbepFill(&bbep, BBEP_WHITE, PLANE_1);
-    bbepFill(&bbep, BBEP_WHITE, PLANE_0);
 }
 
 static bool partial_write_to_panel(int refreshMode) {
@@ -2709,14 +2891,15 @@ static bool partial_write_to_panel(int refreshMode) {
     writeSerial(")", true);
 
     if (partialCtx.bytes_written != partialCtx.expected_stream_size) return false;
-    delay(20);
+//    delay(20);  THIS DELAY IS UNNEEDED
     epdRefreshInProgress = true;
     bool refreshSuccess = partial_trigger_refresh(refreshMode);
     epdRefreshInProgress = false;
-    bbepSleep(&bbep, 1);
-    delay(50);
-    displayPowerState = false;
-    pwrmgm(false);
+    // A successful partial refresh leaves both controller planes consistent.
+    if (refreshSuccess) epdPlanesPrepared = true;
+    // Release keeps the panel warm (rail/SPI up, controller awake) on success;
+    // powers it fully down on failure or on AXP2101 (window 0) boards.
+    epdSessionRelease(refreshSuccess);
     return refreshSuccess;
 }
 
