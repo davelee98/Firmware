@@ -72,6 +72,7 @@ extern bool wifiServerConnected;
 extern ResponseQueueItem responseQueue[10];
 extern uint8_t responseQueueHead;
 extern uint8_t responseQueueTail;
+extern volatile bool esp32BleNotifySubscribed;   // set by onSubscribe (CCCD state notify() actually uses)
 static constexpr uint8_t RESPONSE_QUEUE_SIZE_LOCAL = 10;
 static constexpr uint16_t MAX_RESPONSE_SIZE_LOCAL = 512;
 
@@ -91,7 +92,16 @@ static void esp32_queue_ble_notify_copy(const uint8_t* response, uint16_t len, b
         writeSerial("ERROR: Response too large for queue (" + String(len) + " > " + String(MAX_RESPONSE_SIZE_LOCAL) + ")", true);
         return;
     }
-    if (pServer == nullptr || pServer->getConnectedCount() == 0) {
+    // Gate on the CCCD subscription flag (set by onSubscribe), NOT getConnectedCount():
+    // the latter is a hand-maintained counter whose ++ is skipped when the CONNECT
+    // handler's ble_gap_conn_find() early-returns (dongle fast-connect race), so it can
+    // read 0 mid-connection while the CCCD subscribe and ATT writes still flow. notify()
+    // delivers to subscribed peers, so the flag is the correct precondition for queuing.
+    if (pServer == nullptr || !esp32BleNotifySubscribed) {
+        writeSerial("DROP: response gated at notify-copy: subscribed=" +
+                    String(esp32BleNotifySubscribed ? 1 : 0) +
+                    " connCount=" + String(pServer ? (int)pServer->getConnectedCount() : -1) +
+                    " len=" + String(len), true);
         return;
     }
     uint8_t nextHead = (responseQueueHead + 1) % RESPONSE_QUEUE_SIZE_LOCAL;

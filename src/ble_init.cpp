@@ -228,7 +228,10 @@ void esp32_ble_clear_handles(void) {
 }
 
 bool esp32_ble_notify_enabled(void) {
-    if (pTxCharacteristic == nullptr || pServer == nullptr || pServer->getConnectedCount() == 0) {
+    // Gate on the CCCD subscription flag below, NOT getConnectedCount(): the counter can
+    // read 0 mid-connection (skipped ++ on the dongle fast-connect race) and would falsely
+    // short-circuit a deliverable link here. Keep only the null-pointer guards.
+    if (pTxCharacteristic == nullptr || pServer == nullptr) {
         return false;
     }
 #if defined(CONFIG_NIMBLE_ENABLED)

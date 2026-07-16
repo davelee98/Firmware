@@ -245,7 +245,14 @@ static void flushResponseQueueToBle() {
             pTxCharacteristic->notify();
             responseQueue[responseQueueTail].pending = false;
             responseQueueTail = (responseQueueTail + 1) % RESPONSE_QUEUE_SIZE;
-            if (!quietAck) writeSerial("Response sent successfully");
+            if (!quietAck) {
+                // Depth remaining AFTER this send vs usable ring capacity. The ring
+                // keeps one slot empty to distinguish full from empty, so the max
+                // holdable is RESPONSE_QUEUE_SIZE - 1, not RESPONSE_QUEUE_SIZE.
+                const uint8_t queued = (uint8_t)((responseQueueHead - responseQueueTail + RESPONSE_QUEUE_SIZE) % RESPONSE_QUEUE_SIZE);
+                writeSerial("Response sent successfully (queued: " + String(queued) +
+                            "/" + String(RESPONSE_QUEUE_SIZE - 1) + ")");
+            }
             bleDrain++;
         }
     } else if (pServer && pServer->getConnectedCount() > 0) {
