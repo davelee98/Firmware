@@ -84,7 +84,11 @@ public:
     }
     void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
         (void)connInfo;
-        String value = pCharacteristic->getValue();
+        // Keep the raw NimBLEAttValue: converting to Arduino String uses the C-string
+        // (strlen) constructor, which truncates at the first 0x00 byte. Pipe-write
+        // frames start with 0x00 (00 70 / 00 71 / 00 81), so String() would report
+        // length 0. .length()/.c_str() on NimBLEAttValue preserve the binary payload.
+        NimBLEAttValue value = pCharacteristic->getValue();
         const bool quiet = imageWriteLogQuietFrame((const uint8_t*)value.c_str(), value.length());
         if (!quiet) {
             writeSerial("=== BLE WRITE RECEIVED (ESP32) ===");
