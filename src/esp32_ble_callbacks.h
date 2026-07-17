@@ -35,6 +35,7 @@ extern volatile uint8_t commandQueueHead;
 extern volatile uint8_t commandQueueTail;
 extern uint8_t rebootFlag;
 extern volatile bool esp32BleNotifySubscribed;
+extern BLEServer* pServer;
 
 void updatemsdata();
 void cleanupDirectWriteState(bool refreshDisplay);
@@ -84,6 +85,31 @@ public:
         writeSerial("BLE notify subscription: " + String(esp32BleNotifySubscribed ? "enabled" : "disabled"));
     }
 #endif
+    // DIAGNOSTIC: notify() is void and drops silently at three internal guards
+    // (getConnectedCount()==0 → NO_CLIENT, empty m_subscribedVec → NO_SUBSCRIBER,
+    // per-peer mtu/mask skip → the send never runs). onStatus is the only signal
+    // of what notify() actually did per frame — SUCCESS_NOTIFY means it reached
+    // the host (loss is then downstream/BlueZ); any ERROR_* means the tag itself
+    // dropped it. Pairs with the "Response sent successfully" drain log.
+    void onStatus(BLECharacteristic* pCharacteristic, Status s, uint32_t code) {
+        const char* name;
+        switch (s) {
+            case SUCCESS_INDICATE:        name = "SUCCESS_INDICATE"; break;
+            case SUCCESS_NOTIFY:          name = "SUCCESS_NOTIFY"; break;
+            case ERROR_INDICATE_DISABLED: name = "ERROR_INDICATE_DISABLED"; break;
+            case ERROR_NOTIFY_DISABLED:   name = "ERROR_NOTIFY_DISABLED"; break;
+            case ERROR_GATT:              name = "ERROR_GATT"; break;
+            case ERROR_NO_CLIENT:         name = "ERROR_NO_CLIENT"; break;
+            case ERROR_NO_SUBSCRIBER:     name = "ERROR_NO_SUBSCRIBER"; break;
+            case ERROR_INDICATE_TIMEOUT:  name = "ERROR_INDICATE_TIMEOUT"; break;
+            case ERROR_INDICATE_FAILURE:  name = "ERROR_INDICATE_FAILURE"; break;
+            default:                      name = "UNKNOWN"; break;
+        }
+        (void)pCharacteristic;
+        writeSerial("notify onStatus: " + String(name) + " code=" + String((int)code) +
+                    " connCount=" + String(pServer ? (int)pServer->getConnectedCount() : -1) +
+                    " subscribed=" + String(esp32BleNotifySubscribed ? 1 : 0), true);
+    }
     void onWrite(BLECharacteristic* pCharacteristic) {
         String value = pCharacteristic->getValue();
         const bool quiet = imageWriteLogQuietFrame((const uint8_t*)value.c_str(), value.length());
