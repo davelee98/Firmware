@@ -29,6 +29,7 @@ extern "C" {
 #ifdef TARGET_ESP32
 #include "ble_init.h"   // NimBLE-Arduino + BLE* aliases
 #include "wifi_service.h"
+#include <SPI.h>
 #endif
 
 extern BBEPDISP bbep;
@@ -112,6 +113,13 @@ void bbepWriteCmd(BBEPDISP *pBBEP, uint8_t cmd);
 void bbepCMD2(BBEPDISP *pBBEP, uint8_t cmd1, uint8_t cmd2);
 void bbepWaitBusy(BBEPDISP *pBBEP);
 bool bbepIsBusy(BBEPDISP *pBBEP);
+#ifdef BBEP_T133A01
+void bbepSetCS2(BBEPDISP *pBBEP, uint8_t cs);
+void bbepWriteCmdData(BBEPDISP *pBBEP, uint8_t cmd, const uint8_t *pData, int iLen);
+void bbepStartDataStream(BBEPDISP *pBBEP, uint8_t cmd);
+void bbepWriteDataStreamByte(BBEPDISP *pBBEP, uint8_t data);
+void bbepEndDataStream(BBEPDISP *pBBEP);
+#endif
 void flashLed(uint8_t color, uint8_t brightness);
 bool waitforrefresh(int timeout);
 
@@ -148,8 +156,133 @@ static void prepareEpdRailForBoot() {
 #endif
 }
 
+#ifdef BBEP_T133A01
+// CS2 must be set before bbepInitIO() so dual-chip init reaches both controllers.
+static void e1004InitPanel(void) {
+    const DisplayConfig& d = globalConfig.displays[0];
+    bbepSetCS2(&bbep, e1004_cs2_pin());
+    bbepInitIO(&bbep, d.dc_pin, d.reset_pin, d.busy_pin, d.cs_pin, d.data_pin, d.clk_pin, 8000000);
+}
+
+// Half-panel DTM for bwgbry_split: CS held for left half, then right (no FB).
+static bool e1004GeometryOk = false;
+static bool e1004StreamOpen = false;
+static bool e1004OnLeftHalf = true;
+static uint32_t e1004HalfBytesWritten = 0;
+static uint32_t e1004HalfPlaneBytes = 0;
+
+void e1004_end_plane(void);
+
+static uint8_t e1004_panel_byte(uint8_t packed) {
+    auto nibble = [](uint8_t c) -> uint8_t {
+        c &= 0x0f;
+        switch (c) {
+        case 0x00: case 0x01: case 0x02: case 0x03: case 0x05: case 0x06:
+            return c;
+        default:
+            return 0x00;
+        }
+    };
+    return (uint8_t)((nibble(packed >> 4) << 4) | nibble(packed));
+}
+
+static void e1004_ccset_both(void) {
+    uint8_t data = 0x01;
+    digitalWrite(bbep.iCS2Pin, LOW);
+    bbep.iCSPin = bbep.iCS1Pin;
+    bbepWriteCmdData(&bbep, 0xe0, &data, 1);
+    digitalWrite(bbep.iCS2Pin, HIGH);
+    bbep.iCSPin = bbep.iCS1Pin;
+    bbepWaitBusy(&bbep);
+    delay(10);
+}
+
+static uint32_t e1004_half_plane_bytes(void) {
+    return ((uint32_t)bbep.native_width / 4u) * (uint32_t)bbep.native_height;
+}
+
+bool e1004_begin_plane(void) {
+    if (!e1004_panel_used() || !e1004GeometryOk) return false;
+    if (e1004StreamOpen) e1004_end_plane();
+    e1004_ccset_both();
+    e1004HalfPlaneBytes = e1004_half_plane_bytes();
+    e1004HalfBytesWritten = 0;
+    e1004OnLeftHalf = true;
+    bbep.iCSPin = bbep.iCS1Pin;
+    bbepStartDataStream(&bbep, UC8151_DTM1);
+    e1004StreamOpen = true;
+    return true;
+}
+
+bool e1004_advance_to_cs2(void) {
+    if (!e1004StreamOpen || !e1004OnLeftHalf) return false;
+    bbepEndDataStream(&bbep);
+    e1004OnLeftHalf = false;
+    e1004HalfBytesWritten = 0;
+    bbep.iCSPin = bbep.iCS2Pin;
+    bbepStartDataStream(&bbep, UC8151_DTM1);
+    return true;
+}
+
+void e1004_end_plane(void) {
+    if (!e1004StreamOpen) return;
+    bbepEndDataStream(&bbep);
+    bbep.iCSPin = bbep.iCS1Pin;
+    e1004StreamOpen = false;
+    e1004OnLeftHalf = true;
+    e1004HalfBytesWritten = 0;
+}
+
+void e1004_write_stream_bytes(const uint8_t* data, uint16_t len) {
+    if (!e1004StreamOpen || !data || len == 0) return;
+    uint8_t scratch[128];
+    uint16_t off = 0;
+    while (off < len) {
+        uint16_t n = (uint16_t)(len - off);
+        if (n > sizeof(scratch)) n = sizeof(scratch);
+        for (uint16_t i = 0; i < n; i++) scratch[i] = e1004_panel_byte(data[off + i]);
+        SPI.writeBytes(scratch, n);
+        off = (uint16_t)(off + n);
+    }
+    e1004HalfBytesWritten += len;
+}
+
+static void e1004_sink_bytes(uint8_t* data, uint32_t len) {
+    while (len > 0 && e1004StreamOpen) {
+        if (e1004HalfPlaneBytes == 0) return;
+        uint32_t space = e1004HalfPlaneBytes - e1004HalfBytesWritten;
+        if (space == 0) {
+            if (e1004OnLeftHalf) {
+                if (!e1004_advance_to_cs2()) return;
+                continue;
+            }
+            return;
+        }
+        uint16_t take = (len < space) ? (uint16_t)len : (uint16_t)((space > 0xFFFFu) ? 0xFFFFu : space);
+        e1004_write_stream_bytes(data, take);
+        data += take;
+        len -= take;
+        if (e1004OnLeftHalf && e1004HalfBytesWritten >= e1004HalfPlaneBytes) {
+            if (!e1004_advance_to_cs2()) return;
+        }
+    }
+}
+#else
+bool e1004_begin_plane(void) { return false; }
+bool e1004_advance_to_cs2(void) { return false; }
+void e1004_end_plane(void) {}
+void e1004_write_stream_bytes(const uint8_t* data, uint16_t len) { (void)data; (void)len; }
+#endif
+
 static void initBbepPanelSession() {
     const DisplayConfig& d = globalConfig.displays[0];
+#ifdef BBEP_T133A01
+    if (e1004_panel_used()) {
+        e1004InitPanel();
+        delay(200);
+        return;
+    }
+#endif
     bbepInitIO(&bbep, d.dc_pin, d.reset_pin, d.busy_pin, d.cs_pin, d.data_pin, d.clk_pin, 8000000);
     bbepWakeUp(&bbep);
     bbepSendCMDSequence(&bbep, bbep.pInitFull);
@@ -245,12 +378,20 @@ static bool epdSessionAcquire(bool partialInit) {
         pwrmgm(true);   // -> PWR_ACTIVE (guarded; real transition)
         if (!epdSessionUsesSeeed()) {
             const DisplayConfig& d = globalConfig.displays[0];
-            bbepInitIO(&bbep, d.dc_pin, d.reset_pin, d.busy_pin, d.cs_pin, d.data_pin, d.clk_pin, 8000000);
-            bbepWakeUp(&bbep);
-            const uint8_t* initSeq = partialInit ? (bbep.pInitPart ? bbep.pInitPart : bbep.pInitFull)
-                                                 : bbep.pInitFull;
-            bbepSendCMDSequence(&bbep, initSeq);
-            epdSessionInitWasPartial = partialInit;
+#ifdef BBEP_T133A01
+            if (e1004_panel_used()) {
+                e1004InitPanel();
+                epdSessionInitWasPartial = false;
+            } else
+#endif
+            {
+                bbepInitIO(&bbep, d.dc_pin, d.reset_pin, d.busy_pin, d.cs_pin, d.data_pin, d.clk_pin, 8000000);
+                bbepWakeUp(&bbep);
+                const uint8_t* initSeq = partialInit ? (bbep.pInitPart ? bbep.pInitPart : bbep.pInitFull)
+                                                     : bbep.pInitFull;
+                bbepSendCMDSequence(&bbep, initSeq);
+                epdSessionInitWasPartial = partialInit;
+            }
         }
         cold = true;
     } else {
@@ -262,11 +403,18 @@ static bool epdSessionAcquire(bool partialInit) {
         // Phase 1: full re-init on warm re-acquire (HW reset => registers identical
         // to cold, safest). Phase 2a will skip bbepWakeUp + resend only on change.
         if (!epdSessionUsesSeeed()) {
-            bbepWakeUp(&bbep);
-            const uint8_t* initSeq = partialInit ? (bbep.pInitPart ? bbep.pInitPart : bbep.pInitFull)
-                                                 : bbep.pInitFull;
-            bbepSendCMDSequence(&bbep, initSeq);
-            epdSessionInitWasPartial = partialInit;
+#ifdef BBEP_T133A01
+            if (e1004_panel_used()) {
+                epdSessionInitWasPartial = false;
+            } else
+#endif
+            {
+                bbepWakeUp(&bbep);
+                const uint8_t* initSeq = partialInit ? (bbep.pInitPart ? bbep.pInitPart : bbep.pInitFull)
+                                                     : bbep.pInitFull;
+                bbepSendCMDSequence(&bbep, initSeq);
+                epdSessionInitWasPartial = partialInit;
+            }
         }
         cold = false;
     }
@@ -476,8 +624,11 @@ int mapEpd(int id){
         case 0x003F: return EP31_240x320;
         case 0x0040: return EP75YR_800x480;
         case 0x0041: return EP_PANEL_UNDEFINED;
-        // bb_epaper 2.1.9 does not define the 13.3" EP133 panel yet.
+#ifdef BBEP_T133A01
+        case PANEL_IC_EP133A_SPECTRA_1200X1600: return EP133A_SPECTRA_1200x1600; // 0x0042, Seeed reTerminal E1004
+#else
         case 0x0042: return EP_PANEL_UNDEFINED;
+#endif
         case 0x0043: return EP154_200x200_4GRAY;
         case 0x0044: return EP42B_400x300_4GRAY;
         case 0x0045: return EP397_800x480;
@@ -505,10 +656,31 @@ bool seeed_driver_used(void) {
 #endif
 }
 
+bool e1004_panel_used(void) {
+#ifdef BBEP_T133A01
+    if (globalConfig.display_count < 1) return false;
+    return globalConfig.displays[0].panel_ic_type == PANEL_IC_EP133A_SPECTRA_1200X1600;
+#else
+    return false;
+#endif
+}
+
+// reserved_pin_2 / cs_pin_2; 0 or 0xFF defaults to GPIO2.
+uint8_t e1004_cs2_pin(void) {
+    uint8_t p = globalConfig.displays[0].reserved_pin_2;
+    if (p == 0 || p == 0xFF) return 2;
+    return p;
+}
+
 bool waitforrefresh(int timeout){
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
     if (seeed_driver_used()) return seeed_gfx_wait_refresh(timeout);
 #endif
+    if (e1004_panel_used() && !bbepIsBusy(&bbep)) {
+        // bbepRefresh already waited; idle here means refresh finished.
+        writeSerial("Refresh completed inside bb_epaper", true);
+        return true;
+    }
     // Poll at 10 ms (was 100 ms) so a ~0.5 s refresh returns up to ~90 ms sooner.
     // BUSY asserts within µs of MASTER_ACTIVATE, so the i==0 "never went busy"
     // error check stays valid at a 10 ms first poll. Loop bound scales x10
@@ -1357,7 +1529,21 @@ void initDisplay(){
         memset(&bbep, 0, sizeof(BBEPDISP));
         int panelType = mapEpd(globalConfig.displays[0].panel_ic_type);
         bbepSetPanelType(&bbep, panelType);
-        bbepSetRotation(&bbep, globalConfig.displays[0].rotation * 90);
+        int rotation = globalConfig.displays[0].rotation * 90;
+#ifdef BBEP_T133A01
+        e1004GeometryOk = false;
+        if (e1004_panel_used()) {
+            rotation = 0;  // host bakes rotation into packed image
+            if (globalConfig.displays[0].pixel_width != bbep.native_width ||
+                globalConfig.displays[0].pixel_height != bbep.native_height ||
+                globalConfig.displays[0].color_scheme != COLOR_SCHEME_BWGBRY_SPLIT) {
+                writeSerial("ERROR: E1004 requires a 1200x1600 bwgbry_split (8) display config", true);
+            } else {
+                e1004GeometryOk = true;
+            }
+        }
+#endif
+        bbepSetRotation(&bbep, rotation);
         writeSerial(String("Height: ") + String(globalConfig.displays[0].pixel_height), true);
         writeSerial(String("Width: ") + String(globalConfig.displays[0].pixel_width), true);
         initBbepPanelSession();
@@ -1407,7 +1593,8 @@ int getBitsPerPixel() {
         return 4;
     }
 #endif
-    if (globalConfig.displays[0].color_scheme == COLOR_SCHEME_BWGBRY) return 4;
+    if (globalConfig.displays[0].color_scheme == COLOR_SCHEME_BWGBRY ||
+        globalConfig.displays[0].color_scheme == COLOR_SCHEME_BWGBRY_SPLIT) return 4;
     if (globalConfig.displays[0].color_scheme == COLOR_SCHEME_BWRY) return 2;
     if (globalConfig.displays[0].color_scheme == COLOR_SCHEME_GRAY4) return 2;
     return 1;
@@ -1706,6 +1893,18 @@ static void streamGray4Bytes(const uint8_t* buf, uint32_t len) {
     }
 }
 
+static void directWriteSinkBytes(uint8_t* data, uint32_t len) {
+#ifdef BBEP_T133A01
+    if (e1004_panel_used()) {
+        if (e1004GeometryOk) e1004_sink_bytes(data, len);
+    } else
+#endif
+    {
+        bbepWriteData(&bbep, data, (int)len);
+    }
+    directWriteBytesWritten += len;
+}
+
 static bool directWriteTouchSuspended = false;
 
 void cleanupDirectWriteState(bool refreshDisplay) {
@@ -1730,6 +1929,9 @@ void cleanupDirectWriteState(bool refreshDisplay) {
         if (refreshDisplay) epdSessionForceOff();
         else                epdSessionRelease(true);
     }
+#ifdef BBEP_T133A01
+    if (e1004_panel_used()) e1004_end_plane();
+#endif
     if (directWriteTouchSuspended) {
         touchResumeAfterEpdRefresh();
         directWriteTouchSuspended = false;
@@ -1783,6 +1985,13 @@ static void directWriteActivatePanel(void) {
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
     if (seeed_driver_used()) {
         seeed_gfx_direct_write_reset();
+    } else
+#endif
+#ifdef BBEP_T133A01
+    if (e1004_panel_used()) {
+        if (!e1004_begin_plane()) {
+            writeSerial("ERROR: E1004 dual-CS plane open failed", true);
+        }
     } else
 #endif
     {
@@ -1865,7 +2074,7 @@ void handlePartialWriteStart(uint8_t* data, uint16_t len) {
 
     uint16_t dispW = globalConfig.displays[0].pixel_width;
     uint16_t dispH = globalConfig.displays[0].pixel_height;
-    if (getBitsPerPixel() != 1) {
+    if (getBitsPerPixel() != 1 || e1004_panel_used()) {
         // bb_epaper partial refresh support is effectively non-existent for
         // 2bpp+ panels, and physical panels may not support that mode either.
         // This protocol uses two 1bpp controller planes as old/new image memory.
@@ -1970,8 +2179,7 @@ void handleDirectWriteData(uint8_t* data, uint16_t len) {
         if (directWriteIsGray4() || directWriteBitplanes) {
             streamGray4Bytes(data, bytesToWrite);  // advances directWriteBytesWritten, splits planes
         } else {
-            bbepWriteData(&bbep, data, bytesToWrite);
-            directWriteBytesWritten += bytesToWrite;
+            directWriteSinkBytes(data, bytesToWrite);
         }
     }
     imageWriteLogProgress(directWriteBytesWritten, directWriteTotalBytes);
@@ -2052,6 +2260,7 @@ static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t end
     imageWriteLogFinish(directWriteBytesWritten, directWriteTotalBytes);
     int refreshMode = REFRESH_FULL;
     if (data != nullptr && len >= 1 && data[0] == 1) refreshMode = REFRESH_FAST;
+    if (e1004_panel_used()) refreshMode = REFRESH_FULL;  // fast re-init would wipe RAM
     writeSerial("EPD refresh: ", false);
     writeSerial(refreshMode == REFRESH_FAST ? "FAST" : "FULL", false);
     writeSerial(" (mode=", false);
@@ -2080,6 +2289,9 @@ static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t end
     } else
 #endif
     {
+#ifdef BBEP_T133A01
+        if (e1004_panel_used()) e1004_end_plane();
+#endif
         bbepRefresh(&bbep, refreshMode);
         refreshSuccess = waitforrefresh(60);
         // No bbepSleep here: cleanupDirectWriteState(false) releases the session,
@@ -2257,8 +2469,7 @@ static bool pipeConsumePayload(uint8_t* data, uint16_t len) {
         if (directWriteIsGray4() || directWriteBitplanes) {
             streamGray4Bytes(data, toWrite);  // advances directWriteBytesWritten, splits planes
         } else {
-            bbepWriteData(&bbep, data, toWrite);
-            directWriteBytesWritten += toWrite;
+            directWriteSinkBytes(data, toWrite);
         }
     }
     imageWriteLogProgress(directWriteBytesWritten, directWriteTotalBytes);
@@ -2311,7 +2522,7 @@ void handlePipeWriteStart(uint8_t* data, uint16_t len) {
         uint16_t dispW = globalConfig.displays[0].pixel_width;
         uint16_t dispH = globalConfig.displays[0].pixel_height;
         // 5: two 1bpp controller planes are the partial mechanism; seeed/IT8951 has no equivalent.
-        if (getBitsPerPixel() != 1 || seeed_driver_used()) {
+        if (getBitsPerPixel() != 1 || seeed_driver_used() || e1004_panel_used()) {
             displayed_etag = 0; sendPipeStartNack(0x06); return;
         }
         // 6: etag gate — nonzero and must match what is currently on the panel.
@@ -2770,8 +2981,7 @@ static bool zlib_stream_to_direct_write(const uint8_t* data, uint32_t len, bool 
                 }
             } else
             {
-                bbepWriteData(&bbep, decompressionChunk, bytesOut);
-                directWriteBytesWritten += (uint32_t)bytesOut;
+                directWriteSinkBytes(decompressionChunk, (uint32_t)bytesOut);
             }
             if (directWriteBytesWritten > directWriteDecompressedTotal) {
                 return false;

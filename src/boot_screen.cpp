@@ -310,6 +310,7 @@ static void formatBootColorSchemeText(uint8_t scheme, char* out, uint16_t outSiz
         case COLOR_SCHEME_BWY:     snprintf(out, outSize, "BWY"); break;
         case COLOR_SCHEME_BWRY:    snprintf(out, outSize, "BWRY"); break;
         case COLOR_SCHEME_BWGBRY:  snprintf(out, outSize, "6 color"); break;
+        case COLOR_SCHEME_BWGBRY_SPLIT: snprintf(out, outSize, "6c split"); break;
         case COLOR_SCHEME_GRAY4:   snprintf(out, outSize, "4 gray"); break;
         case COLOR_SCHEME_GRAY16:  snprintf(out, outSize, "16 gray"); break;
         case COLOR_SCHEME_GRAY8:   snprintf(out, outSize, "7 color"); break;
@@ -520,6 +521,7 @@ static const uint8_t kSchemeWhiteValue[] = {
     0xFF,  // 5: COLOR_SCHEME_GRAY4  — 2bpp gray, code 11b per pixel = white
     0xFF,  // 6: COLOR_SCHEME_GRAY16 — 4bpp Seeed 16-gray, nibble 15 = white
     0xFF,  // 7: COLOR_SCHEME_GRAY8  — 1bpp (default)
+    0x11,  // 8: COLOR_SCHEME_BWGBRY_SPLIT — same white nibble as BWGBRY
 };
 
 // Spectra 6 footer swatches: palette order black/white/yellow/red/blue/green →
@@ -613,6 +615,7 @@ bool writeBootScreenWithQr() {
                 numSwatches = 4;
                 break;
             case COLOR_SCHEME_BWGBRY:
+            case COLOR_SCHEME_BWGBRY_SPLIT:
                 for (int i = 0; i < 6; i++) swatchCode[i] = kBwgbrySwatchCodes[i];
                 numSwatches = 6;
                 break;
@@ -878,6 +881,11 @@ bool writeBootScreenWithQr() {
     int textStartY = textY;
     const uint16_t footerInfoY = (uint16_t)(footerY0 + (footerPadTop + footerInfoH - 7 * footerInfoScale) / 2);
 
+    // Dual-controller E1004 (bwgbry_split): left half-plane then right (continuous DTM).
+    const bool e1004Stream = e1004_panel_used();
+    const int e1004HalfPasses = e1004Stream ? 2 : 1;
+    const uint16_t e1004HalfPitch = (uint16_t)(pitch / 2);
+
     uint8_t* row = staticRowBuffer;
     // bb_epaper 4-gray (scheme 5) needs the packed 2bpp image split into two
     // 1-bit controller planes, so render the frame once per plane and
@@ -893,19 +901,34 @@ bool writeBootScreenWithQr() {
         return false;
     }
     const int planePasses = (gray4Split || colorSwatchPlane1) ? 2 : 1;
+    for (int halfPass = 0; halfPass < e1004HalfPasses; halfPass++) {
+        if (e1004Stream) {
+            if (halfPass == 0) {
+                if (!e1004_begin_plane()) {
+                    writeSerial("Boot screen: E1004 dual-CS plane open failed", true);
+                    return false;
+                }
+            } else if (!e1004_advance_to_cs2()) {
+                writeSerial("Boot screen: E1004 CS2 advance failed", true);
+                e1004_end_plane();
+                return false;
+            }
+        }
     for (int pass = 0; pass < planePasses; pass++) {
         const int bitSel = pass;  // pass 0 -> LSB/PLANE_0, pass 1 -> MSB/PLANE_1
         const int targetPlane = gray4Split ? (pass == 0 ? PLANE_0 : PLANE_1)
                                            : (colorSwatchPlane1 ? (pass == 0 ? PLANE_0 : PLANE_1)
                                                                  : (useBitplanes ? PLANE_0 : getplane()));
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
-        if (!seeed_driver_used()) {
+        if (!seeed_driver_used() && !e1004Stream) {
             bbepSetAddrWindow(&bbep, 0, 0, w, h);
             bbepStartWrite(&bbep, targetPlane);
         }
 #else
-        bbepSetAddrWindow(&bbep, 0, 0, w, h);
-        bbepStartWrite(&bbep, targetPlane);
+        if (!e1004Stream) {
+            bbepSetAddrWindow(&bbep, 0, 0, w, h);
+            bbepStartWrite(&bbep, targetPlane);
+        }
 #endif
         const int ls = bootLineStep(middleScaleText);
         const uint16_t domY  = (uint16_t)textStartY;
@@ -916,14 +939,22 @@ bool writeBootScreenWithQr() {
             : (uint16_t)(fwY + ls);
         const uint16_t k2Y   = (uint16_t)(k1Y + ls);
         const bool colorPlanePass = colorSwatchPlane1 && pass == 1;
+        // E1004 half-pass: only paint the half we will stream (avoids 2× full-frame work).
+        const uint16_t xPaint0 = e1004Stream ? (uint16_t)(halfPass * (w / 2u)) : (uint16_t)0;
+        const uint16_t xPaint1 = e1004Stream ? (uint16_t)(xPaint0 + (w / 2u)) : w;
         for (uint16_t y_native = 0; y_native < h; y_native++) {
-            memset(row, colorPlanePass ? 0x00 : whiteValue, pitch);
+            if (e1004Stream) {
+                memset(row + (size_t)halfPass * e1004HalfPitch,
+                       colorPlanePass ? 0x00 : whiteValue, e1004HalfPitch);
+            } else {
+                memset(row, colorPlanePass ? 0x00 : whiteValue, pitch);
+            }
             bool colorRowOutsideBand = false;
             if (colorPlanePass && (rotation == 0 || rotation == 2)) {
                 const int rowLy = (rotation == 2) ? (int)(h_log - 1u - y_native) : (int)y_native;
                 colorRowOutsideBand = (rowLy < swatchY0 || rowLy >= swatchY1);
             }
-            for (uint16_t x_native = 0; !colorRowOutsideBand && x_native < w; x_native++) {
+            for (uint16_t x_native = xPaint0; !colorRowOutsideBand && x_native < xPaint1; x_native++) {
                 // Map native pixel to logical (user-visible) coordinates
                 uint16_t lx, ly;
                 switch (rotation) {
@@ -975,18 +1006,25 @@ bool writeBootScreenWithQr() {
                 seeed_gfx_boot_write_row(y_native, row, pitch);
             } else if (gray4Split) {
                 writeGray4PlaneRow(row, pitch, planePitch, w, bitSel);
+            } else if (e1004Stream) {
+                e1004_write_stream_bytes(row + (size_t)halfPass * e1004HalfPitch, e1004HalfPitch);
             } else {
                 bbepWriteData(&bbep, row, pitch);
             }
 #else
             if (gray4Split) {
                 writeGray4PlaneRow(row, pitch, planePitch, w, bitSel);
+            } else if (e1004Stream) {
+                e1004_write_stream_bytes(row + (size_t)halfPass * e1004HalfPitch, e1004HalfPitch);
             } else {
                 bbepWriteData(&bbep, row, pitch);
             }
 #endif
         }
     }
+    } // halfPass
+
+    if (e1004Stream) e1004_end_plane();
 
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
     if (seeed_driver_used()) {

@@ -28,6 +28,10 @@ jobs:
         run: |
           platformio run --environment esp32-s3-N16R8
 
+      - name: Build esp32-s3-E1004 firmware
+        run: |
+          platformio run --environment esp32-s3-E1004
+
       - name: Build esp32-c3-N16 firmware
         run: |
           platformio run --environment esp32-c3-N16

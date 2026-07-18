@@ -78,6 +78,8 @@ struct PowerOption {
 // Decimal 3000–3999 = Seeed_GFX / OpenDisplay runtime epaper (add new IDs here as panels ship).
 #define PANEL_IC_SEEED_ED103TC2_1872X1404 3000u
 #define PANEL_IC_SEEED_ED103TC2_1872X1404_4GRAY 3001u
+// 13.3" T133A01 Spectra 6 dual-controller (Seeed reTerminal E1004).
+#define PANEL_IC_EP133A_SPECTRA_1200X1600 0x0042u
 
 #define BOOT_ROW_BUFFER_SIZE 960
 
@@ -91,6 +93,8 @@ struct PowerOption {
 #define COLOR_SCHEME_GRAY4 5u
 #define COLOR_SCHEME_GRAY8 7u
 #define COLOR_SCHEME_GRAY16 6u
+// Spectra 6 nibbles, left-half plane then right (dual-CS, no FB).
+#define COLOR_SCHEME_BWGBRY_SPLIT 8u
 
 // display.transmission_modes (config.yaml bitfield).
 #define TRANSMISSION_MODE_ZIPXL          (1u << 0)

@@ -349,7 +349,7 @@ for _tag, _block in BLOCKS.items():
 # this tool doesn't know about yet.
 VALID_ENUMS: dict[tuple[str, str], set[int]] = {
     ("sensors", "sensor_type"): {1, 2, 3, 4, 5},  # SENSOR_TYPE_TEMPERATURE..BQ27220
-    ("displays", "color_scheme"): {0, 1, 2, 3, 4, 5, 6, 7},  # COLOR_SCHEME_MONO..GRAY8
+    ("displays", "color_scheme"): {0, 1, 2, 3, 4, 5, 6, 7, 8},  # COLOR_SCHEME_MONO..BWGBRY_SPLIT
     ("touch_controllers", "touch_ic_type"): {0, 1},  # TOUCH_IC_NONE, TOUCH_IC_GT911
 }
 
