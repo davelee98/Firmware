@@ -707,7 +707,7 @@ void enterDFUMode() {
 }
 
 void handleDeepSleepCommand(const uint8_t* payload, uint16_t payloadLen) {
-    writeSerial("=== DEEP SLEEP COMMAND (0x0052) ===", true);
+    writeSerial("=== DEEP SLEEP COMMAND (0x" + String(CMD_DEEP_SLEEP, HEX) + ") ===", true);
 #ifdef TARGET_ESP32
     // Optional 2-byte big-endian seconds payload overrides the configured
     // deep-sleep duration for exactly one cycle. 0x0000 = explicit no-override.
@@ -716,35 +716,75 @@ void handleDeepSleepCommand(const uint8_t* payload, uint16_t payloadLen) {
         overrideSeconds = ((uint16_t)payload[0] << 8) | payload[1];
         // Bytes beyond 2 ignored for forward compatibility.
     } else if (payloadLen == 1) {
-        writeSerial("WARNING: malformed 0x0052 payload length 1 - ignoring", true);
+        writeSerial("WARNING: malformed 0x" + String(CMD_DEEP_SLEEP, HEX) + " payload length 1 - ignoring", true);
     }
-    if (powerLatchDffConfigured()) {
-        if (overrideSeconds != 0) {
-            writeSerial("0x0052 duration payload ignored (D-FF hard power off has no timer)", true);
-        }
-        uint8_t ok[] = {RESP_ACK, RESP_DEEP_SLEEP, 0x00, 0x00};
-        sendResponse(ok, sizeof(ok));
-        delay(100);
-        powerLatchPowerOff();
-        return;
+    // Enforce a 60 s floor on host overrides: a very short wake timer risks a rapid
+    // sleep/wake churn that never stays awake long enough to service a client. This
+    // applies to the OVERRIDE only; overrideSeconds == 0 means "no override" and defers
+    // to the configured deep_sleep_time_seconds, which is not subject to this floor.
+    constexpr uint16_t MIN_DEEP_SLEEP_OVERRIDE_SECONDS = 60;
+    if (overrideSeconds != 0 && overrideSeconds < MIN_DEEP_SLEEP_OVERRIDE_SECONDS) {
+        writeSerial("Override " + String(overrideSeconds) + "s below " +
+                    String(MIN_DEEP_SLEEP_OVERRIDE_SECONDS) + "s floor - clamping", true);
+        overrideSeconds = MIN_DEEP_SLEEP_OVERRIDE_SECONDS;
     }
     if (globalConfig.power_option.power_mode != 1) {
-        writeSerial("Device not battery powered - 0x0052 rejected", true);
-        uint8_t errorResponse[] = {RESP_NACK, RESP_DEEP_SLEEP, 0x02, 0x00};
+        writeSerial("Device not battery powered - 0x" + String(CMD_DEEP_SLEEP, HEX) + " rejected", true);
+        uint8_t errorResponse[] = {RESP_NACK, RESP_DEEP_SLEEP, OD_ERR_DEEP_SLEEP_NOT_BATTERY, 0x00};
         sendResponse(errorResponse, sizeof(errorResponse));
         return;
     }
     if (globalConfig.power_option.deep_sleep_time_seconds == 0) {
-        writeSerial("Deep sleep disabled in config - 0x0052 rejected", true);
-        uint8_t errorResponse[] = {RESP_NACK, RESP_DEEP_SLEEP, 0x01, 0x00};
+        writeSerial("Deep sleep disabled in config - 0x" + String(CMD_DEEP_SLEEP, HEX) + " rejected", true);
+        uint8_t errorResponse[] = {RESP_NACK, RESP_DEEP_SLEEP, OD_ERR_DEEP_SLEEP_DISABLED, 0x00};
         sendResponse(errorResponse, sizeof(errorResponse));
         return;
     }
     // Explicit host request: sleep even though the requesting client is connected.
     enterDeepSleep(true, overrideSeconds);
 #else
+    // Non-ESP32 (nRF etc.) have no timer deep sleep. The protocol permits a NACK here
+    // ([0xFF][0x53][OD_ERR_DEEP_SLEEP_UNSUPPORTED][0x00]), but we intentionally stay
+    // silent to preserve existing behavior — leave as-is unless a caller needs the NACK.
     (void)payload;
     (void)payloadLen;
     writeSerial("Deep sleep command not supported on this target", true);
 #endif
+}
+
+void handlePowerOffCommand(const uint8_t* payload, uint16_t payloadLen) {
+    writeSerial("=== POWER OFF COMMAND (0x" + String(CMD_POWER_OFF, HEX) + ") ===", true);
+    // CMD_POWER_OFF request is bare [0x00][0x52]; any trailing payload is RESERVED
+    // and ignored (unlike CMD_DEEP_SLEEP 0x0053, this has no duration payload).
+    (void)payload;
+    (void)payloadLen;
+    // powerLatch* are defined on every target (no-op stubs off ESP32; the header
+    // guarantees callers need no guards), so no #ifdef TARGET_ESP32 is required here:
+    // powerLatchDffConfigured() returns false off-ESP32 -> falls through to the NACK.
+    if (powerLatchDffConfigured()) {
+        // Fire-and-forget hard rail-cut: queue the ACK, then release the D-FF latch.
+        // On latch HW the rail usually drops before the ACK is actually transmitted.
+        uint8_t ok[] = {RESP_ACK, RESP_POWER_OFF, 0x00, 0x00};
+        sendResponse(ok, sizeof(ok));
+        delay(100);
+        powerLatchPowerOff();
+        return;
+    }
+    // ANCHOR(power-off-no-latch-fallback): FUTURE WORK for a later agent/implementer.
+    // On non-latch BATTERY targets, implement "enter deep sleep with NO wake timer"
+    // (sleep indefinitely; wake only on button/reset) as the closest equivalent to a
+    // hard power-off, instead of the unsupported NACK below. Caveats before doing so:
+    //   1. This DEVIATES from the current protocol, which mandates
+    //      OD_ERR_POWER_OFF_UNSUPPORTED (0x00) for non-latch targets — update the
+    //      0x0052 @response contract in opendisplay-protocol/src/opendisplay_protocol.h
+    //      FIRST, then propagate the header and implement here.
+    //   2. enterDeepSleep(true, 0) currently means "use the configured duration", NOT
+    //      "no timer" — a genuinely timer-less deep-sleep entry path must be added.
+    //   3. Mains-powered targets (power_option.power_mode != 1) must STILL NACK — never
+    //      sleep a device that cannot self-repower.
+    // Until that lands: capability-gated NACK. Scope: OD_ERR_POWER_OFF_* only — do NOT
+    // conflate with 0x53 deep sleep (a device that refuses 0x52 may still accept 0x53).
+    writeSerial("No power latch on this target - 0x" + String(CMD_POWER_OFF, HEX) + " rejected", true);
+    uint8_t errorResponse[] = {RESP_NACK, RESP_POWER_OFF, OD_ERR_POWER_OFF_UNSUPPORTED, 0x00};
+    sendResponse(errorResponse, sizeof(errorResponse));
 }

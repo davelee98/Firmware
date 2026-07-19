@@ -657,6 +657,9 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
             writeSerial("=== ENTER DFU MODE COMMAND (0x0051) ===");
             enterDFUMode();
             break;
+        case CMD_POWER_OFF:
+            handlePowerOffCommand(data + 2, len - 2);
+            break;
         case CMD_DEEP_SLEEP:
             handleDeepSleepCommand(data + 2, len - 2);
             break;

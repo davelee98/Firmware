@@ -526,7 +526,7 @@ void enterDeepSleep(bool force, uint16_t overrideSleepSeconds) {
     // Defense in depth for the min-wake hold (first boot / button wake). MUST
     // stay ahead of the advertising stop below: everything past that point
     // commits to esp_deep_sleep_start(), so a late abort would leave the device
-    // awake with the radio dark. force (host 0x0052) bypasses the hold.
+    // awake with the radio dark. force (host 0x0053) bypasses the hold.
     if (!force && minWakeHoldActive()) {
         writeSerial("Skipping deep sleep - minimum wake window active");
         return;
@@ -553,7 +553,7 @@ void enterDeepSleep(bool force, uint16_t overrideSleepSeconds) {
     esp32_ble_clear_handles();
     delay(100);
     writeSerial("BLE deinitialized");
-    // Host override (0x0052 payload) applies to this one cycle only: it is a
+    // Host override (0x0053 payload) applies to this one cycle only: it is a
     // parameter, never stored, so an aborted or later sleep reverts to config.
     uint16_t sleepSeconds = overrideSleepSeconds ? overrideSleepSeconds
                                                  : globalConfig.power_option.deep_sleep_time_seconds;
