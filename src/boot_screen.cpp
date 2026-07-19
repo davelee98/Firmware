@@ -313,6 +313,14 @@ static void formatBootColorSchemeText(uint8_t scheme, char* out, uint16_t outSiz
         case OD_COLOR_SCHEME_BWGBRY_SPLIT: snprintf(out, outSize, "6c split"); break;
         case OD_COLOR_SCHEME_GRAY4:   snprintf(out, outSize, "4 gray"); break;
         case OD_COLOR_SCHEME_GRAY16:  snprintf(out, outSize, "16 gray"); break;
+        // WARNING: SEVEN_COLOR (scheme value 7) is NOT properly implemented in this
+        // firmware. This case only produces the human-readable label "7 color"; there
+        // is no actual 7-color plane packing or palette rendering anywhere. Everywhere
+        // else scheme 7 is treated as a 1bpp mono stub (see kSchemeWhiteValue[7] and the
+        // footer-swatch switch, where it falls in with OD_COLOR_SCHEME_MONO). Value 7 is
+        // the canonical SEVEN_COLOR slot (formerly the bogus GRAY8); it is kept so the
+        // enum stays aligned with opendisplay_structs.h, but do NOT assume a device
+        // reporting scheme 7 will render 7 colors until real support is added.
         case OD_COLOR_SCHEME_SEVEN_COLOR:   snprintf(out, outSize, "7 color"); break;
         default:                   snprintf(out, outSize, "?"); break;
     }
@@ -520,7 +528,12 @@ static const uint8_t kSchemeWhiteValue[] = {
     0x11,  // 4: OD_COLOR_SCHEME_BWGBRY — 4bpp Spectra6, nibble 1 = white
     0xFF,  // 5: OD_COLOR_SCHEME_GRAY4  — 2bpp gray, code 11b per pixel = white
     0xFF,  // 6: OD_COLOR_SCHEME_GRAY16 — 4bpp Seeed 16-gray, nibble 15 = white
-    0xFF,  // 7: OD_COLOR_SCHEME_SEVEN_COLOR  — 1bpp (default)
+    // 7: OD_COLOR_SCHEME_SEVEN_COLOR — NOT properly implemented. There is no 7-color
+    // rendering path; this entry deliberately treats scheme 7 as a 1bpp mono stub
+    // (0xFF = all-ones white plane, same as MONO). Kept as a positional placeholder so
+    // schemes >= 8 index correctly and the value stays aligned with the canonical
+    // SEVEN_COLOR enum. Replace with a real 7-color white code if/when support lands.
+    0xFF,  // 7: OD_COLOR_SCHEME_SEVEN_COLOR — 1bpp mono stub (see note above)
     0x11,  // 8: OD_COLOR_SCHEME_BWGBRY_SPLIT — same white nibble as BWGBRY
 };
 
@@ -599,6 +612,12 @@ bool writeBootScreenWithQr() {
     if (useZoneLayout && footerH > footerPadTop + 20) {
         switch (colorScheme) {
             case OD_COLOR_SCHEME_MONO:
+            // WARNING: SEVEN_COLOR (scheme 7) is NOT properly implemented — it is
+            // deliberately lumped in with MONO here and emits only 2 black/white footer
+            // swatches, NOT a 7-color palette. There is no real 7-color swatch/plane
+            // code anywhere in this firmware. Kept aligned with the canonical
+            // OD_COLOR_SCHEME_SEVEN_COLOR enum value; add a dedicated case with the true
+            // 7-color palette when actual support is implemented.
             case OD_COLOR_SCHEME_SEVEN_COLOR:
                 swatchCode[0] = 0; swatchCode[1] = 1;
                 numSwatches = 2;
