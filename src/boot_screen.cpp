@@ -149,7 +149,7 @@ static void formatBootKeyDisplay(char* out, uint16_t outSize) {
     if (bootKeyIsAllZero()) {
         for (uint16_t i = 0; i < hexLen; i++) out[i] = '-';
         out[hexLen] = '\0';
-    } else if (!(securityConfig.flags & SECURITY_FLAG_SHOW_KEY_ON_SCREEN)) {
+    } else if (!(securityConfig.flags & OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN)) {
         for (uint16_t i = 0; i < hexLen; i++) out[i] = 'X';
         out[hexLen] = '\0';
     } else {
@@ -161,7 +161,7 @@ static void bootFormatKeyLine(char* out, size_t outSize, const char* label,
                               const uint8_t* keyBytes, uint8_t numBytes) {
     if (bootKeyIsAllZero()) {
         snprintf(out, outSize, "%s not set", label);
-    } else if (!(securityConfig.flags & SECURITY_FLAG_SHOW_KEY_ON_SCREEN)) {
+    } else if (!(securityConfig.flags & OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN)) {
         snprintf(out, outSize, "%s hidden", label);
     } else {
         char hex[17];
@@ -305,15 +305,23 @@ static uint16_t bootMaxTextWidth(const char* const* lines, unsigned n, int scale
 static void formatBootColorSchemeText(uint8_t scheme, char* out, uint16_t outSize) {
     if (!out || outSize == 0) return;
     switch (scheme) {
-        case COLOR_SCHEME_MONO:    snprintf(out, outSize, "BW"); break;
-        case COLOR_SCHEME_BWR:     snprintf(out, outSize, "BWR"); break;
-        case COLOR_SCHEME_BWY:     snprintf(out, outSize, "BWY"); break;
-        case COLOR_SCHEME_BWRY:    snprintf(out, outSize, "BWRY"); break;
-        case COLOR_SCHEME_BWGBRY:  snprintf(out, outSize, "6 color"); break;
-        case COLOR_SCHEME_BWGBRY_SPLIT: snprintf(out, outSize, "6c split"); break;
-        case COLOR_SCHEME_GRAY4:   snprintf(out, outSize, "4 gray"); break;
-        case COLOR_SCHEME_GRAY16:  snprintf(out, outSize, "16 gray"); break;
-        case COLOR_SCHEME_GRAY8:   snprintf(out, outSize, "7 color"); break;
+        case OD_COLOR_SCHEME_MONO:    snprintf(out, outSize, "BW"); break;
+        case OD_COLOR_SCHEME_BWR:     snprintf(out, outSize, "BWR"); break;
+        case OD_COLOR_SCHEME_BWY:     snprintf(out, outSize, "BWY"); break;
+        case OD_COLOR_SCHEME_BWRY:    snprintf(out, outSize, "BWRY"); break;
+        case OD_COLOR_SCHEME_BWGBRY:  snprintf(out, outSize, "6 color"); break;
+        case OD_COLOR_SCHEME_BWGBRY_SPLIT: snprintf(out, outSize, "6c split"); break;
+        case OD_COLOR_SCHEME_GRAY4:   snprintf(out, outSize, "4 gray"); break;
+        case OD_COLOR_SCHEME_GRAY16:  snprintf(out, outSize, "16 gray"); break;
+        // WARNING: SEVEN_COLOR (scheme value 7) is NOT properly implemented in this
+        // firmware. This case only produces the human-readable label "7 color"; there
+        // is no actual 7-color plane packing or palette rendering anywhere. Everywhere
+        // else scheme 7 is treated as a 1bpp mono stub (see kSchemeWhiteValue[7] and the
+        // footer-swatch switch, where it falls in with OD_COLOR_SCHEME_MONO). Value 7 is
+        // the canonical SEVEN_COLOR slot (formerly the bogus GRAY8); it is kept so the
+        // enum stays aligned with opendisplay_structs.h, but do NOT assume a device
+        // reporting scheme 7 will render 7 colors until real support is added.
+        case OD_COLOR_SCHEME_SEVEN_COLOR:   snprintf(out, outSize, "7 color"); break;
         default:                   snprintf(out, outSize, "?"); break;
     }
 }
@@ -513,15 +521,20 @@ static void writeGray4PlaneRow(const uint8_t* row2bpp, int pitch2bpp, int planeP
 }
 
 static const uint8_t kSchemeWhiteValue[] = {
-    0xFF,  // 0: COLOR_SCHEME_MONO   — 1bpp, bit 1 = white
-    0xFF,  // 1: COLOR_SCHEME_BWR    — 1bpp bitplane, all-ones = white plane
-    0xFF,  // 2: COLOR_SCHEME_BWY    — 1bpp bitplane
-    0x55,  // 3: COLOR_SCHEME_BWRY   — 2bpp, code 01b per pixel = white
-    0x11,  // 4: COLOR_SCHEME_BWGBRY — 4bpp Spectra6, nibble 1 = white
-    0xFF,  // 5: COLOR_SCHEME_GRAY4  — 2bpp gray, code 11b per pixel = white
-    0xFF,  // 6: COLOR_SCHEME_GRAY16 — 4bpp Seeed 16-gray, nibble 15 = white
-    0xFF,  // 7: COLOR_SCHEME_GRAY8  — 1bpp (default)
-    0x11,  // 8: COLOR_SCHEME_BWGBRY_SPLIT — same white nibble as BWGBRY
+    0xFF,  // 0: OD_COLOR_SCHEME_MONO   — 1bpp, bit 1 = white
+    0xFF,  // 1: OD_COLOR_SCHEME_BWR    — 1bpp bitplane, all-ones = white plane
+    0xFF,  // 2: OD_COLOR_SCHEME_BWY    — 1bpp bitplane
+    0x55,  // 3: OD_COLOR_SCHEME_BWRY   — 2bpp, code 01b per pixel = white
+    0x11,  // 4: OD_COLOR_SCHEME_BWGBRY — 4bpp Spectra6, nibble 1 = white
+    0xFF,  // 5: OD_COLOR_SCHEME_GRAY4  — 2bpp gray, code 11b per pixel = white
+    0xFF,  // 6: OD_COLOR_SCHEME_GRAY16 — 4bpp Seeed 16-gray, nibble 15 = white
+    // 7: OD_COLOR_SCHEME_SEVEN_COLOR — NOT properly implemented. There is no 7-color
+    // rendering path; this entry deliberately treats scheme 7 as a 1bpp mono stub
+    // (0xFF = all-ones white plane, same as MONO). Kept as a positional placeholder so
+    // schemes >= 8 index correctly and the value stays aligned with the canonical
+    // SEVEN_COLOR enum. Replace with a real 7-color white code if/when support lands.
+    0xFF,  // 7: OD_COLOR_SCHEME_SEVEN_COLOR — 1bpp mono stub (see note above)
+    0x11,  // 8: OD_COLOR_SCHEME_BWGBRY_SPLIT — same white nibble as BWGBRY
 };
 
 // Spectra 6 footer swatches: palette order black/white/yellow/red/blue/green →
@@ -572,7 +585,7 @@ bool writeBootScreenWithQr() {
     const int footerY0 = (int)h_log - footerH;
     const int middleH  = footerY0 - headerH;
     const uint8_t colorScheme = globalConfig.displays[0].color_scheme;
-    const bool useBitplanes = (colorScheme == COLOR_SCHEME_BWR || colorScheme == COLOR_SCHEME_BWY);
+    const bool useBitplanes = (colorScheme == OD_COLOR_SCHEME_BWR || colorScheme == OD_COLOR_SCHEME_BWY);
     const int bitsPerPixel = getBitsPerPixel();
     int pitch;
     if (bitsPerPixel == 4) pitch = w / 2;
@@ -598,32 +611,38 @@ bool writeBootScreenWithQr() {
     int     numSwatches = 0;
     if (useZoneLayout && footerH > footerPadTop + 20) {
         switch (colorScheme) {
-            case COLOR_SCHEME_MONO:
-            case COLOR_SCHEME_GRAY8:
+            case OD_COLOR_SCHEME_MONO:
+            // WARNING: SEVEN_COLOR (scheme 7) is NOT properly implemented — it is
+            // deliberately lumped in with MONO here and emits only 2 black/white footer
+            // swatches, NOT a 7-color palette. There is no real 7-color swatch/plane
+            // code anywhere in this firmware. Kept aligned with the canonical
+            // OD_COLOR_SCHEME_SEVEN_COLOR enum value; add a dedicated case with the true
+            // 7-color palette when actual support is implemented.
+            case OD_COLOR_SCHEME_SEVEN_COLOR:
                 swatchCode[0] = 0; swatchCode[1] = 1;
                 numSwatches = 2;
                 break;
-            case COLOR_SCHEME_BWR:
-            case COLOR_SCHEME_BWY:
+            case OD_COLOR_SCHEME_BWR:
+            case OD_COLOR_SCHEME_BWY:
                 swatchCode[0] = 0; swatchIsColor[0] = false;
                 swatchCode[1] = 1; swatchIsColor[1] = false;
                 swatchCode[2] = 1; swatchIsColor[2] = true;  // red/yellow: PLANE_1 bit set
                 numSwatches = 3;
                 break;
-            case COLOR_SCHEME_BWRY:
+            case OD_COLOR_SCHEME_BWRY:
                 swatchCode[0] = 0; swatchCode[1] = 1; swatchCode[2] = 2; swatchCode[3] = 3;
                 numSwatches = 4;
                 break;
-            case COLOR_SCHEME_BWGBRY:
-            case COLOR_SCHEME_BWGBRY_SPLIT:
+            case OD_COLOR_SCHEME_BWGBRY:
+            case OD_COLOR_SCHEME_BWGBRY_SPLIT:
                 for (int i = 0; i < 6; i++) swatchCode[i] = kBwgbrySwatchCodes[i];
                 numSwatches = 6;
                 break;
-            case COLOR_SCHEME_GRAY4:
+            case OD_COLOR_SCHEME_GRAY4:
                 bootGray4FillSwatchCodes(globalConfig.displays[0].panel_ic_type, swatchCode);
                 numSwatches = 4;
                 break;
-            case COLOR_SCHEME_GRAY16:
+            case OD_COLOR_SCHEME_GRAY16:
                 for (int i = 0; i < 16; i++) swatchCode[i] = (uint8_t)i;
                 numSwatches = 16;
                 break;
@@ -641,13 +660,13 @@ bool writeBootScreenWithQr() {
     for (size_t i = 0; i < last6.length(); i++) last6.setCharAt(i, (char)toupper(last6.charAt(i)));
 
     uint8_t payload[23] = {0};
-    uint16_t res = globalConfig.displays[0].tag_type;
+    uint16_t res = globalConfig.displays[0].legacy_tag_type;
     payload[0] = (uint8_t)((res >> 8) & 0xFF);
     payload[1] = (uint8_t)(res & 0xFF);
     payload[2] = (uint8_t)strtoul(last6.substring(0, 2).c_str(), nullptr, 16);
     payload[3] = (uint8_t)strtoul(last6.substring(2, 4).c_str(), nullptr, 16);
     payload[4] = (uint8_t)strtoul(last6.substring(4, 6).c_str(), nullptr, 16);
-    if (securityConfig.flags & SECURITY_FLAG_SHOW_KEY_ON_SCREEN) {
+    if (securityConfig.flags & OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN) {
         memcpy(&payload[5], securityConfig.encryption_key, 16);
     } else {
         memset(&payload[5], 0, 16);
@@ -890,7 +909,7 @@ bool writeBootScreenWithQr() {
     // bb_epaper 4-gray (scheme 5) needs the packed 2bpp image split into two
     // 1-bit controller planes, so render the frame once per plane and
     // de-interleave. Every other scheme writes a single packed plane in one pass.
-    const bool gray4Split = (colorScheme == COLOR_SCHEME_GRAY4)
+    const bool gray4Split = (colorScheme == OD_COLOR_SCHEME_GRAY4)
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
         && !seeed_driver_used()
 #endif

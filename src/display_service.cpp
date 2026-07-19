@@ -362,7 +362,7 @@ static bool epdSessionUsesSeeed(void) {
 static uint32_t epdKeepAliveWindowMs(void) {
     uint8_t s = globalConfig.power_option.screen_timeout_seconds;
     for (uint8_t i = 0; i < globalConfig.sensor_count; i++) {
-        if (globalConfig.sensors[i].sensor_type == SENSOR_TYPE_AXP2101) {
+        if (globalConfig.sensors[i].sensor_type == OD_SENSOR_TYPE_AXP2101) {
             if (s != 0) {
                 writeSerial("[EPD session] AXP2101 present - keep-alive forced off (screen_timeout_seconds ignored)", true);
             }
@@ -671,7 +671,7 @@ int mapEpd(int id){
         case 0x0040: return EP75YR_800x480;
         case 0x0041: return EP_PANEL_UNDEFINED;
 #ifdef BBEP_T133A01
-        case PANEL_IC_EP133A_SPECTRA_1200X1600: return EP133A_SPECTRA_1200x1600; // 0x0042, Seeed reTerminal E1004
+        case OD_PANEL_IC_EP133A_SPECTRA_1200X1600: return EP133A_SPECTRA_1200x1600; // 0x0042, Seeed reTerminal E1004
 #else
         case 0x0042: return EP_PANEL_UNDEFINED;
 #endif
@@ -695,8 +695,8 @@ bool seeed_driver_used(void) {
 #else
     if (globalConfig.display_count < 1) return false;
     const struct DisplayConfig& d = globalConfig.displays[0];
-    if (d.panel_ic_type != PANEL_IC_SEEED_ED103TC2_1872X1404 &&
-        d.panel_ic_type != PANEL_IC_SEEED_ED103TC2_1872X1404_4GRAY) return false;
+    if (d.panel_ic_type != OD_PANEL_IC_ED103TC2_1872X1404 &&
+        d.panel_ic_type != OD_PANEL_IC_ED103TC2_1872X1404_4GRAY) return false;
     if (d.display_technology != 0 && d.display_technology != 1) return false;
     return true;
 #endif
@@ -705,15 +705,15 @@ bool seeed_driver_used(void) {
 bool e1004_panel_used(void) {
 #ifdef BBEP_T133A01
     if (globalConfig.display_count < 1) return false;
-    return globalConfig.displays[0].panel_ic_type == PANEL_IC_EP133A_SPECTRA_1200X1600;
+    return globalConfig.displays[0].panel_ic_type == OD_PANEL_IC_EP133A_SPECTRA_1200X1600;
 #else
     return false;
 #endif
 }
 
-// reserved_pin_2 / cs_pin_2; 0 or 0xFF defaults to GPIO2.
+// cs_pin_2; 0 or 0xFF defaults to GPIO2.
 uint8_t e1004_cs2_pin(void) {
-    uint8_t p = globalConfig.displays[0].reserved_pin_2;
+    uint8_t p = globalConfig.displays[0].cs_pin_2;
     if (p == 0 || p == 0xFF) return 2;
     return p;
 }
@@ -1015,19 +1015,19 @@ void initSensors(){
         writeSerial("Initializing sensor " + String(i) + " (instance " + String(sensor->instance_number) + ")", true);
         writeSerial("  Type: 0x" + String(sensor->sensor_type, HEX), true);
         writeSerial("  Bus ID: " + String(sensor->bus_id), true);
-        if(sensor->sensor_type == SENSOR_TYPE_AXP2101){
+        if(sensor->sensor_type == OD_SENSOR_TYPE_AXP2101){
             writeSerial("  Detected AXP2101 PMIC sensor", true);
         }
-        else if(sensor->sensor_type == SENSOR_TYPE_TEMPERATURE){
+        else if(sensor->sensor_type == OD_SENSOR_TYPE_TEMPERATURE){
             writeSerial("  Temperature sensor (initialization not implemented)", true);
         }
-        else if(sensor->sensor_type == SENSOR_TYPE_HUMIDITY){
+        else if(sensor->sensor_type == OD_SENSOR_TYPE_HUMIDITY){
             writeSerial("  Humidity sensor (initialization not implemented)", true);
         }
-        else if(sensor->sensor_type == SENSOR_TYPE_SHT40){
+        else if(sensor->sensor_type == OD_SENSOR_TYPE_SHT40){
             writeSerial("  SHT40 (I2C + MSD slot)", true);
         }
-        else if(sensor->sensor_type == SENSOR_TYPE_BQ27220){
+        else if(sensor->sensor_type == OD_SENSOR_TYPE_BQ27220){
             writeSerial("  BQ27220 fuel gauge (MSD voltage + optional dynamic SOC/status bytes)", true);
         }
         else{
@@ -1483,7 +1483,7 @@ static void renderChar_4BPP(uint8_t* rowBuffer, const uint8_t* fontData, int fon
 }
 
 static void renderChar_2BPP(uint8_t* rowBuffer, const uint8_t* fontData, int fontRow, int charIdx, int startX, int charWidth, int pitch, uint8_t colorScheme, int fontScale) {
-    uint8_t whiteCode = (colorScheme == COLOR_SCHEME_GRAY4) ? 0x03 : 0x01;
+    uint8_t whiteCode = (colorScheme == OD_COLOR_SCHEME_GRAY4) ? 0x03 : 0x01;
     int pixelsPerByte = 4;
     for (int col = 0; col < charWidth; col += pixelsPerByte) {
         uint8_t pixelByte = 0;
@@ -1553,7 +1553,7 @@ void initDisplay(){
         }
         writeSerial(String("Height: ") + String(globalConfig.displays[0].pixel_height), true);
         writeSerial(String("Width: ") + String(globalConfig.displays[0].pixel_width), true);
-        if (! (globalConfig.displays[0].transmission_modes & TRANSMISSION_MODE_CLEAR_ON_BOOT)){
+        if (! (globalConfig.displays[0].transmission_modes & OD_TRANSMISSION_MODE_CLEAR_ON_BOOT)){
             writeBootScreenWithQr();
             writeSerial("EPD refresh: FULL (boot, Seeed)", true);
             touchSuspendForEpdRefresh();
@@ -1582,7 +1582,7 @@ void initDisplay(){
             rotation = 0;  // host bakes rotation into packed image
             if (globalConfig.displays[0].pixel_width != bbep.native_width ||
                 globalConfig.displays[0].pixel_height != bbep.native_height ||
-                globalConfig.displays[0].color_scheme != COLOR_SCHEME_BWGBRY_SPLIT) {
+                globalConfig.displays[0].color_scheme != OD_COLOR_SCHEME_BWGBRY_SPLIT) {
                 writeSerial("ERROR: E1004 requires a 1200x1600 bwgbry_split (8) display config", true);
             } else {
                 e1004GeometryOk = true;
@@ -1593,7 +1593,7 @@ void initDisplay(){
         writeSerial(String("Height: ") + String(globalConfig.displays[0].pixel_height), true);
         writeSerial(String("Width: ") + String(globalConfig.displays[0].pixel_width), true);
         initBbepPanelSession();
-        if (! (globalConfig.displays[0].transmission_modes & TRANSMISSION_MODE_CLEAR_ON_BOOT)){
+        if (! (globalConfig.displays[0].transmission_modes & OD_TRANSMISSION_MODE_CLEAR_ON_BOOT)){
             bool bootOk = refreshBootScreenFull();
             if (!bootOk && !nrfVbusPresent()) {
                 writeSerial("Boot refresh failed on battery — re-powering panel and retrying", true);
@@ -1626,23 +1626,23 @@ void initDisplay(){
 
 int getplane() {
     uint8_t colorScheme = globalConfig.displays[0].color_scheme;
-    if (colorScheme == COLOR_SCHEME_MONO || colorScheme == COLOR_SCHEME_GRAY16) return PLANE_0;
-    if (colorScheme == COLOR_SCHEME_BWR || colorScheme == COLOR_SCHEME_BWY) return PLANE_0;
-    if (colorScheme == COLOR_SCHEME_GRAY4) return PLANE_1;
+    if (colorScheme == OD_COLOR_SCHEME_MONO || colorScheme == OD_COLOR_SCHEME_GRAY16) return PLANE_0;
+    if (colorScheme == OD_COLOR_SCHEME_BWR || colorScheme == OD_COLOR_SCHEME_BWY) return PLANE_0;
+    if (colorScheme == OD_COLOR_SCHEME_GRAY4) return PLANE_1;
     return PLANE_1;
 }
 
 int getBitsPerPixel() {
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
     if (globalConfig.display_count > 0 &&
-        globalConfig.displays[0].panel_ic_type == PANEL_IC_SEEED_ED103TC2_1872X1404_4GRAY) {
+        globalConfig.displays[0].panel_ic_type == OD_PANEL_IC_ED103TC2_1872X1404_4GRAY) {
         return 4;
     }
 #endif
-    if (globalConfig.displays[0].color_scheme == COLOR_SCHEME_BWGBRY ||
-        globalConfig.displays[0].color_scheme == COLOR_SCHEME_BWGBRY_SPLIT) return 4;
-    if (globalConfig.displays[0].color_scheme == COLOR_SCHEME_BWRY) return 2;
-    if (globalConfig.displays[0].color_scheme == COLOR_SCHEME_GRAY4) return 2;
+    if (globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_BWGBRY ||
+        globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_BWGBRY_SPLIT) return 4;
+    if (globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_BWRY) return 2;
+    if (globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_GRAY4) return 2;
     return 1;
 }
 
@@ -1723,17 +1723,20 @@ void updatemsdata(){
     else if (tempEncoded > 255) tempEncoded = 255;
     uint8_t temperatureByte = (uint8_t)tempEncoded;
     uint8_t batteryVoltageLowByte = (uint8_t)(batteryVoltage10mv & 0xFF);
-    uint8_t statusByte = ((batteryVoltage10mv >> 8) & 0x01) |
-                         ((rebootFlag & 0x01) << 1) |
-                         ((connectionRequested & 0x01) << 2) |
-                         ((mloopcounter & 0x0F) << 4);
-    uint16_t msd_cid = 0x2446;
-    memset(msd_payload, 0, 16);
-    memcpy(msd_payload, (uint8_t*)&msd_cid, sizeof(msd_cid));
-    memcpy(&msd_payload[2], dynamicreturndata, 11);
-    msd_payload[13] = temperatureByte;
-    msd_payload[14] = batteryVoltageLowByte;
-    msd_payload[15] = statusByte;
+    uint8_t statusByte = (((batteryVoltage10mv >> 8) & 0x01) ? OD_MSD_STATUS_BATTERY_VOLTAGE_BIT8 : 0) |
+                         (rebootFlag ? OD_MSD_STATUS_REBOOT_FLAG : 0) |
+                         (connectionRequested ? OD_MSD_STATUS_CONNECTION_REQUESTED : 0) |
+                         (((uint8_t)(mloopcounter << OD_MSD_STATUS_MAIN_LOOP_COUNTER_SHIFT)) & OD_MSD_STATUS_MAIN_LOOP_COUNTER_MASK);
+    // Build the 16-byte advertisement via the canonical wire struct (all little-endian),
+    // then copy into the global msd_payload[16] that the BLE adv APIs below consume.
+    struct MsdAdvertisement m;
+    memset(&m, 0, sizeof m);
+    m.company_id = 0x2446;
+    memcpy(m.dynamic, dynamicreturndata, sizeof m.dynamic);
+    m.chip_temperature = temperatureByte;
+    m.battery_voltage_low = batteryVoltageLowByte;
+    m.status = statusByte;
+    memcpy(msd_payload, &m, sizeof m);
 #ifdef TARGET_NRF
     static uint8_t prev_msd_payload_nrf[16] = {0xFF};
     if (memcmp(prev_msd_payload_nrf, msd_payload, 16) == 0) {
@@ -1899,7 +1902,7 @@ bool handleDirectWriteCompressedData(uint8_t* data, uint16_t len) {
 // True when the active display uses the bb_epaper 4-gray scheme (two 1-bit
 // controller planes). The Seeed driver path has its own 4bpp handling.
 static inline bool directWriteIsGray4(void) {
-    return (globalConfig.displays[0].color_scheme == COLOR_SCHEME_GRAY4)
+    return (globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_GRAY4)
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
         && !seeed_driver_used()
 #endif
@@ -1985,7 +1988,7 @@ void cleanupDirectWriteState(bool refreshDisplay) {
 // Plane2,Width,Height,TotalBytes}. No panel I/O, no acks. Shared by 0x70 and 0x80.
 static void directWriteComputeGeometry(bool compressed) {
     uint8_t colorScheme = globalConfig.displays[0].color_scheme;
-    directWriteBitplanes = (colorScheme == COLOR_SCHEME_BWR || colorScheme == COLOR_SCHEME_BWY);
+    directWriteBitplanes = (colorScheme == OD_COLOR_SCHEME_BWR || colorScheme == OD_COLOR_SCHEME_BWY);
     directWritePlane2 = false;
     directWriteCompressed = compressed;
     directWriteWidth = globalConfig.displays[0].pixel_width;
@@ -2091,11 +2094,14 @@ void handlePartialWriteStart(uint8_t* data, uint16_t len) {
     resetPipeWriteState();
     imageWriteLogReset();
 
-    if (len < 17) {
+    if (len < sizeof(struct PartialWriteStartHeader)) {
         send_direct_write_nack(0x76, OD_ERR_PARTIAL_STREAM, false);
         return;
     }
 
+    // Layout is struct PartialWriteStartHeader (17 B). It is ALL big-endian, unlike
+    // the little-endian PipePartialExt twin, so we parse by hand (the shifts ARE the
+    // byte-swap) rather than overlaying the struct on this LE MCU.
     uint8_t flags     = data[0];
     uint32_t oldEtag  = parse_be_u32(data + 1);
     uint32_t newEtag  = parse_be_u32(data + 5);
@@ -2540,14 +2546,15 @@ void handlePipeWriteStart(uint8_t* data, uint16_t len) {
     // Fixed 10-byte payload (opcode already stripped by the dispatcher):
     // ver(1)+flags(1)+req_w(1)+req_n(1)+client_max_frame(2)+total_size(4).
     // Tolerate trailing bytes (future fields).
-    if (len < 10) { sendPipeStartNack(OD_ERR_PIPE_START_BAD_HEADER); return; }
-    uint8_t  ver              = data[0];
-    uint8_t  flags            = data[1];
-    uint8_t  req_w            = data[2];
-    uint8_t  req_n            = data[3];
-    uint16_t client_max_frame = (uint16_t)data[4] | ((uint16_t)data[5] << 8);
-    uint32_t total_size       = (uint32_t)data[6] | ((uint32_t)data[7] << 8)
-                              | ((uint32_t)data[8] << 16) | ((uint32_t)data[9] << 24);
+    if (len < sizeof(struct PipeStartRequest)) { sendPipeStartNack(OD_ERR_PIPE_START_BAD_HEADER); return; }
+    struct PipeStartRequest req;
+    memcpy(&req, data, sizeof req);   // canonical 10-byte LE header (byte-identical to the old shifts)
+    uint8_t  ver              = req.version;
+    uint8_t  flags            = req.flags;
+    uint8_t  req_w            = req.req_window;
+    uint8_t  req_n            = req.req_ack_every;
+    uint16_t client_max_frame = req.client_max_frame;
+    uint32_t total_size       = req.total_size;
 
     if (ver != PIPE_VERSION) { sendPipeStartNack(OD_ERR_PIPE_START_BAD_HEADER); return; }
     // Defined flags: bit0 zlib compression, bit1 partial-region refresh. Any other bit unsupported.
@@ -2558,17 +2565,20 @@ void handlePipeWriteStart(uint8_t* data, uint16_t len) {
 
     // Partial START appends a 12-byte LE extension after total_size (payload len 22 vs 10):
     // [old_etag:4][x:2][y:2][w:2][h:2]. LE, unlike 0x76's big-endian layout.
-    if (partial && len < 22) { sendPipeStartNack(OD_ERR_PIPE_START_BAD_HEADER); return; }
+    if (partial && len < sizeof(struct PipeStartRequest) + sizeof(struct PipePartialExt)) {
+        sendPipeStartNack(OD_ERR_PIPE_START_BAD_HEADER); return;
+    }
     uint32_t old_etag = 0;
     uint16_t rectX = 0, rectY = 0, rectW = 0, rectH = 0;
     uint32_t planeBytes = 0;
     if (partial) {
-        old_etag = (uint32_t)data[10] | ((uint32_t)data[11] << 8)
-                 | ((uint32_t)data[12] << 16) | ((uint32_t)data[13] << 24);
-        rectX = (uint16_t)data[14] | ((uint16_t)data[15] << 8);
-        rectY = (uint16_t)data[16] | ((uint16_t)data[17] << 8);
-        rectW = (uint16_t)data[18] | ((uint16_t)data[19] << 8);
-        rectH = (uint16_t)data[20] | ((uint16_t)data[21] << 8);
+        struct PipePartialExt ext;
+        memcpy(&ext, data + sizeof(struct PipeStartRequest), sizeof ext);  // 12-byte LE extension
+        old_etag = ext.old_etag;
+        rectX = ext.x;
+        rectY = ext.y;
+        rectW = ext.w;
+        rectH = ext.h;
 
         // Partial validations (plan 1.2, order 5-7). All precede any hardware touch; any
         // failure clears displayed_etag for parity with send_direct_write_nack. These are

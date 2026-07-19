@@ -188,9 +188,9 @@ void connect_callback(uint16_t conn_handle);
 void disconnect_callback(uint16_t conn_handle, uint8_t reason);
 #ifdef TARGET_ESP32
 void fullSetupAfterConnection();
-// force: sleep even with a client connected (explicit host request 0x0052).
+// force: sleep even with a client connected (explicit host request 0x0053).
 // overrideSleepSeconds: nonzero replaces deep_sleep_time_seconds for this one
-// sleep cycle (0x0052 duration payload); never changes sleep eligibility.
+// sleep cycle (0x0053 duration payload); never changes sleep eligibility.
 void enterDeepSleep(bool force = false, uint16_t overrideSleepSeconds = 0);
 extern bool advertising_timeout_active;
 extern uint32_t advertising_start_time;

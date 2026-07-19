@@ -407,13 +407,13 @@ bool loadGlobalConfig(){
                 }
                 break;
             case 0x29: // passive_buzzer
-                if (globalConfig.passive_buzzer_count < 4 && offset + sizeof(struct PassiveBuzzerConfig) <= configLen - 2) {
-                    memcpy(&globalConfig.passive_buzzers[globalConfig.passive_buzzer_count], &configData[offset], sizeof(struct PassiveBuzzerConfig));
-                    offset += sizeof(struct PassiveBuzzerConfig);
+                if (globalConfig.passive_buzzer_count < 4 && offset + sizeof(struct BuzzerConfig) <= configLen - 2) {
+                    memcpy(&globalConfig.passive_buzzers[globalConfig.passive_buzzer_count], &configData[offset], sizeof(struct BuzzerConfig));
+                    offset += sizeof(struct BuzzerConfig);
                     globalConfig.passive_buzzer_count++;
                 } else if (globalConfig.passive_buzzer_count >= 4) {
                     writeSerial("WARNING: Maximum passive_buzzer count reached, skipping");
-                    offset += sizeof(struct PassiveBuzzerConfig);
+                    offset += sizeof(struct BuzzerConfig);
                 } else {
                     writeSerial("ERROR: Not enough data for passive_buzzer");
                     globalConfig.loaded = false;
@@ -478,7 +478,7 @@ bool loadGlobalConfig(){
                     wifiEncryptionType = wc.encryption_type;
 
 #ifdef TARGET_ESP32
-                    memcpy(wifiServerUrl, wc.reserved, 64);
+                    memcpy(wifiServerUrl, wc.server_host, 64);
                     wifiServerUrl[64] = '\0';
 
                     bool isStringFormat = false;
@@ -496,17 +496,17 @@ bool loadGlobalConfig(){
                         (wifiServerUrl[0] != 0 || wifiServerUrl[1] != 0 ||
                          wifiServerUrl[2] != 0 || wifiServerUrl[3] != 0)) {
                         uint8_t ip[4];
-                        ip[0] = wc.reserved[0];
-                        ip[1] = wc.reserved[1];
-                        ip[2] = wc.reserved[2];
-                        ip[3] = wc.reserved[3];
+                        ip[0] = wc.server_host[0];
+                        ip[1] = wc.server_host[1];
+                        ip[2] = wc.server_host[2];
+                        ip[3] = wc.server_host[3];
                         snprintf(wifiServerUrl, 65, "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
                         writeSerial("Converted numeric IP to string: \"" + String(wifiServerUrl) + "\"");
                     } else if (!isStringFormat && wifiServerUrl[0] != '\0') {
-                        uint32_t ipNum = (uint32_t)wc.reserved[0] |
-                                        ((uint32_t)wc.reserved[1] << 8) |
-                                        ((uint32_t)wc.reserved[2] << 16) |
-                                        ((uint32_t)wc.reserved[3] << 24);
+                        uint32_t ipNum = (uint32_t)wc.server_host[0] |
+                                        ((uint32_t)wc.server_host[1] << 8) |
+                                        ((uint32_t)wc.server_host[2] << 16) |
+                                        ((uint32_t)wc.server_host[3] << 24);
                         uint8_t ip[4];
                         ip[0] = (ipNum >> 24) & 0xFF;
                         ip[1] = (ipNum >> 16) & 0xFF;
@@ -516,7 +516,10 @@ bool loadGlobalConfig(){
                         writeSerial("Converted 32-bit integer to IP string: \"" + String(wifiServerUrl) + "\"");
                     }
 
-                    wifiServerPort = (uint16_t)(((uint16_t)wc.reserved[64] << 8) | wc.reserved[65]);
+                    // server_port is the one BIG-ENDIAN field in WifiConfig; read it byte-wise
+                    // (former reserved[64]=MSB, reserved[65]=LSB).
+                    wifiServerPort = (uint16_t)(((uint16_t)((const uint8_t*)&wc.server_port)[0] << 8) |
+                                                ((const uint8_t*)&wc.server_port)[1]);
                     if (wifiServerPort == 0) {
                         wifiServerPort = 2446;
                     }
@@ -581,17 +584,17 @@ bool loadGlobalConfig(){
                             writeSerial("Security config: Encryption disabled (flag set to 0)");
                         }
                         // Log security flags
-                        if (securityConfig.flags & SECURITY_FLAG_REWRITE_ALLOWED) {
+                        if (securityConfig.flags & OD_SECURITY_FLAG_REWRITE_ALLOWED) {
                             writeSerial("Security config: Rewrite allowed (unauthorized config writes permitted)");
                         }
-                        if (securityConfig.flags & SECURITY_FLAG_SHOW_KEY_ON_SCREEN) {
+                        if (securityConfig.flags & OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN) {
                             writeSerial("Security config: Show key on screen enabled (future feature)");
                         }
-                        if (securityConfig.flags & SECURITY_FLAG_RESET_PIN_ENABLED) {
+                        if (securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_ENABLED) {
                             writeSerial("Security config: Reset pin " + String(securityConfig.reset_pin) + 
-                                       " enabled (polarity: " + String((securityConfig.flags & SECURITY_FLAG_RESET_PIN_POLARITY) ? "HIGH" : "LOW") + 
-                                       ", pullup: " + String((securityConfig.flags & SECURITY_FLAG_RESET_PIN_PULLUP) ? "yes" : "no") + 
-                                       ", pulldown: " + String((securityConfig.flags & SECURITY_FLAG_RESET_PIN_PULLDOWN) ? "yes" : "no") + ")");
+                                       " enabled (polarity: " + String((securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_POLARITY) ? "HIGH" : "LOW") + 
+                                       ", pullup: " + String((securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_PULLUP) ? "yes" : "no") + 
+                                       ", pulldown: " + String((securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_PULLDOWN) ? "yes" : "no") + ")");
                         } else {
                             writeSerial("Security config: Reset pin disabled");
                         }
@@ -682,12 +685,12 @@ void printConfigSummary(){
     writeSerial("Min Wake Time: " + String(globalConfig.power_option.min_wake_time_seconds) + " seconds");
     writeSerial("TX Power: " + String(globalConfig.power_option.tx_power));
     writeSerial("Sleep Flags: 0x" + String(globalConfig.power_option.sleep_flags, HEX));
-    writeSerial("Button Wake: " + String((globalConfig.power_option.sleep_flags & SLEEP_FLAG_BUTTON_WAKE_DISABLE) ? "disabled" : "enabled") + " (sleep_flags bit0)");
+    writeSerial("Button Wake: " + String((globalConfig.power_option.sleep_flags & OD_SLEEP_FLAG_BUTTON_WAKE_DISABLE) ? "disabled" : "enabled") + " (sleep_flags bit0)");
     writeSerial("Screen Timeout: " + String(globalConfig.power_option.screen_timeout_seconds) + " s (EPD keep-alive; 0 = off immediately after refresh)");
     writeSerial("Battery Sense Pin: " + String(globalConfig.power_option.battery_sense_pin));
     writeSerial("Battery Sense Enable Pin: " + String(globalConfig.power_option.battery_sense_enable_pin));
     writeSerial("Battery Sense Flags: 0x" + String(globalConfig.power_option.battery_sense_flags, HEX));
-    writeSerial("  ENABLE_INVERTED: " + String((globalConfig.power_option.battery_sense_flags & BATTERY_SENSE_FLAG_ENABLE_INVERTED) ? "yes" : "no"));
+    writeSerial("  ENABLE_INVERTED: " + String((globalConfig.power_option.battery_sense_flags & OD_BATTERY_SENSE_FLAG_ENABLE_INVERTED) ? "yes" : "no"));
     writeSerial("Capacity Estimator: " + String(globalConfig.power_option.capacity_estimator));
     writeSerial("Voltage Scaling Factor: " + String(globalConfig.power_option.voltage_scaling_factor));
     writeSerial("Deep Sleep Current: " + String(globalConfig.power_option.deep_sleep_current_ua) + " uA");
@@ -700,7 +703,7 @@ void printConfigSummary(){
         writeSerial("  Panel IC Type: 0x" + String(globalConfig.displays[i].panel_ic_type, HEX));
         writeSerial("  Resolution: " + String(globalConfig.displays[i].pixel_width) + "x" + String(globalConfig.displays[i].pixel_height));
         writeSerial("  Size: " + String(globalConfig.displays[i].active_width_mm) + "x" + String(globalConfig.displays[i].active_height_mm) + " mm");
-        writeSerial("  Tag Type: 0x" + String(globalConfig.displays[i].tag_type, HEX));
+        writeSerial("  Tag Type: 0x" + String(globalConfig.displays[i].legacy_tag_type, HEX));
         writeSerial("  Rotation: " + String(globalConfig.displays[i].rotation * 90) + " degrees");
         writeSerial("  Reset Pin: " + String(globalConfig.displays[i].reset_pin));
         writeSerial("  Busy Pin: " + String(globalConfig.displays[i].busy_pin));
@@ -710,11 +713,11 @@ void printConfigSummary(){
         writeSerial("  Partial Update: " + String(globalConfig.displays[i].partial_update_support ? "Yes" : "No"));
         writeSerial("  Color Scheme: 0x" + String(globalConfig.displays[i].color_scheme, HEX));
         writeSerial("  Transmission Modes: 0x" + String(globalConfig.displays[i].transmission_modes, HEX));
-        writeSerial("    ZIPXL: " + String((globalConfig.displays[i].transmission_modes & TRANSMISSION_MODE_ZIPXL) ? "enabled" : "disabled"));
-        writeSerial("    ZIP: " + String((globalConfig.displays[i].transmission_modes & TRANSMISSION_MODE_ZIP) ? "enabled" : "disabled"));
-        writeSerial("    G5: " + String((globalConfig.displays[i].transmission_modes & TRANSMISSION_MODE_G5) ? "enabled" : "disabled"));
-        writeSerial("    DIRECT_WRITE: " + String((globalConfig.displays[i].transmission_modes & TRANSMISSION_MODE_DIRECT_WRITE) ? "enabled" : "disabled"));
-        writeSerial("    CLEAR_ON_BOOT: " + String((globalConfig.displays[i].transmission_modes & TRANSMISSION_MODE_CLEAR_ON_BOOT) ? "enabled" : "disabled"));
+        writeSerial("    ZIPXL: " + String((globalConfig.displays[i].transmission_modes & OD_TRANSMISSION_MODE_STREAMING_DECOMPRESSION) ? "enabled" : "disabled"));
+        writeSerial("    ZIP: " + String((globalConfig.displays[i].transmission_modes & OD_TRANSMISSION_MODE_ZIP) ? "enabled" : "disabled"));
+        writeSerial("    G5: " + String((globalConfig.displays[i].transmission_modes & OD_TRANSMISSION_MODE_G5) ? "enabled" : "disabled"));
+        writeSerial("    DIRECT_WRITE: " + String((globalConfig.displays[i].transmission_modes & OD_TRANSMISSION_MODE_DIRECT_WRITE) ? "enabled" : "disabled"));
+        writeSerial("    CLEAR_ON_BOOT: " + String((globalConfig.displays[i].transmission_modes & OD_TRANSMISSION_MODE_CLEAR_ON_BOOT) ? "enabled" : "disabled"));
         writeSerial("  Full update energy (mC): " + String(globalConfig.displays[i].full_update_mC));
         writeSerial("");
     }
@@ -763,15 +766,15 @@ void printConfigSummary(){
         writeSerial("  Instance: " + String(globalConfig.binary_inputs[i].instance_number));
         writeSerial("  Type: 0x" + String(globalConfig.binary_inputs[i].input_type, HEX));
         writeSerial("  Display As: 0x" + String(globalConfig.binary_inputs[i].display_as, HEX));
-        writeSerial("  Pins: 1=" + String(globalConfig.binary_inputs[i].reserved_pin_1) + 
-                   " 2=" + String(globalConfig.binary_inputs[i].reserved_pin_2) + 
-                   " 3=" + String(globalConfig.binary_inputs[i].reserved_pin_3) + 
-                   " 4=" + String(globalConfig.binary_inputs[i].reserved_pin_4) + 
-                   " 5=" + String(globalConfig.binary_inputs[i].reserved_pin_5) + 
-                   " 6=" + String(globalConfig.binary_inputs[i].reserved_pin_6) + 
-                   " 7=" + String(globalConfig.binary_inputs[i].reserved_pin_7) + 
-                   " 8=" + String(globalConfig.binary_inputs[i].reserved_pin_8));
-        writeSerial("  Input Flags: 0x" + String(globalConfig.binary_inputs[i].input_flags, HEX));
+        writeSerial("  Pins: 1=" + String(globalConfig.binary_inputs[i].input_pin_1) +
+                   " 2=" + String(globalConfig.binary_inputs[i].input_pin_2) +
+                   " 3=" + String(globalConfig.binary_inputs[i].input_pin_3) +
+                   " 4=" + String(globalConfig.binary_inputs[i].input_pin_4) +
+                   " 5=" + String(globalConfig.binary_inputs[i].input_pin_5) +
+                   " 6=" + String(globalConfig.binary_inputs[i].input_pin_6) +
+                   " 7=" + String(globalConfig.binary_inputs[i].input_pin_7) +
+                   " 8=" + String(globalConfig.binary_inputs[i].input_pin_8));
+        writeSerial("  Input Flags: 0x" + String(globalConfig.binary_inputs[i].pins_used, HEX));
         writeSerial("  Invert: 0x" + String(globalConfig.binary_inputs[i].invert, HEX));
         writeSerial("  Pullups: 0x" + String(globalConfig.binary_inputs[i].pullups, HEX));
         writeSerial("  Pulldowns: 0x" + String(globalConfig.binary_inputs[i].pulldowns, HEX));
