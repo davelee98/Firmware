@@ -795,14 +795,14 @@ void secureEraseConfig() {
 }
 
 void checkResetPin() {
-    if (!(securityConfig.flags & SECURITY_FLAG_RESET_PIN_ENABLED)) {
+    if (!(securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_ENABLED)) {
         return;
     }
 
     uint8_t pin = securityConfig.reset_pin;
-    bool polarity = (securityConfig.flags & SECURITY_FLAG_RESET_PIN_POLARITY) != 0;
-    bool pullup = (securityConfig.flags & SECURITY_FLAG_RESET_PIN_PULLUP) != 0;
-    bool pulldown = (securityConfig.flags & SECURITY_FLAG_RESET_PIN_PULLDOWN) != 0;
+    bool polarity = (securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_POLARITY) != 0;
+    bool pullup = (securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_PULLUP) != 0;
+    bool pulldown = (securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_PULLDOWN) != 0;
 
     writeSerial("Checking reset pin " + String(pin) + " (polarity: " + String(polarity ? "HIGH" : "LOW") +
                 ", pullup: " + String(pullup) + ", pulldown: " + String(pulldown) + ")", true);

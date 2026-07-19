@@ -619,7 +619,7 @@ void pwrmgm(bool onoff){
     uint8_t axp2101_bus_id = 0xFF;
     bool axp2101_found = false;
     for(uint8_t i = 0; i < globalConfig.sensor_count; i++){
-        if(globalConfig.sensors[i].sensor_type == SENSOR_TYPE_AXP2101){
+        if(globalConfig.sensors[i].sensor_type == OD_SENSOR_TYPE_AXP2101){
             axp2101_bus_id = globalConfig.sensors[i].bus_id;
             axp2101_found = true;
             break;
@@ -777,7 +777,7 @@ void powerDownExternalFlashFromConfig(void) {
     }
     const FlashConfig* flashCfg = nullptr;
     for (uint8_t i = 0; i < globalConfig.flash_config_count; i++) {
-        if ((globalConfig.flash_configs[i].flags & FLASH_CONFIG_FLAG_ENABLED) != 0) {
+        if ((globalConfig.flash_configs[i].flags & OD_FLASH_FLAG_ENABLED) != 0) {
             flashCfg = &globalConfig.flash_configs[i];
             break;
         }

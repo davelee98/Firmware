@@ -574,11 +574,11 @@ void initButtons() {
         if (input->button_data_byte_index > 10) continue;
         uint16_t instanceHoldMs = (input->power_off_hold_sec == 0) ? 3000u : (uint16_t)input->power_off_hold_sec * 1000u;
         uint8_t* instancePins[8] = {
-            &input->reserved_pin_1,&input->reserved_pin_2,&input->reserved_pin_3,&input->reserved_pin_4,
-            &input->reserved_pin_5,&input->reserved_pin_6,&input->reserved_pin_7,&input->reserved_pin_8
+            &input->input_pin_1,&input->input_pin_2,&input->input_pin_3,&input->input_pin_4,
+            &input->input_pin_5,&input->input_pin_6,&input->input_pin_7,&input->input_pin_8
         };
         for (uint8_t pinIdx = 0; pinIdx < 8; pinIdx++) {
-            if (input->input_flags != 0 && (input->input_flags & (1 << pinIdx)) == 0) {
+            if (input->pins_used != 0 && (input->pins_used & (1 << pinIdx)) == 0) {
                 continue;
             }
             uint8_t pin = *instancePins[pinIdx];

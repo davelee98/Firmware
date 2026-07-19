@@ -11,11 +11,11 @@ void writeSerial(String message, bool newLine = true);
 
 static_assert(sizeof(SensorData) == 30, "SensorData must remain 30 bytes");
 
-#ifndef CHARGER_FLAG_ENABLE_ACTIVE_LOW
-#define CHARGER_FLAG_ENABLE_ACTIVE_LOW (1u << 0)
+#ifndef OD_CHARGER_FLAG_ENABLE_ACTIVE_LOW
+#define OD_CHARGER_FLAG_ENABLE_ACTIVE_LOW (1u << 0)
 #endif
-#ifndef CHARGER_FLAG_STATE_ACTIVE_LOW
-#define CHARGER_FLAG_STATE_ACTIVE_LOW (1u << 1)
+#ifndef OD_CHARGER_FLAG_STATE_ACTIVE_LOW
+#define OD_CHARGER_FLAG_STATE_ACTIVE_LOW (1u << 1)
 #endif
 
 #define BQ27220_CMD_VOLTAGE 0x08u
@@ -71,7 +71,7 @@ static bool bq27220_read_block(const SensorData* s, uint8_t cmd, uint8_t* buf, u
 
 static const SensorData* bq27220_config(void) {
     for (uint8_t i = 0; i < globalConfig.sensor_count; i++) {
-        if (globalConfig.sensors[i].sensor_type == SENSOR_TYPE_BQ27220) {
+        if (globalConfig.sensors[i].sensor_type == OD_SENSOR_TYPE_BQ27220) {
             return &globalConfig.sensors[i];
         }
     }
@@ -101,7 +101,7 @@ void initChargerGpio(void) {
     const uint8_t en = globalConfig.power_option.charge_enable_pin;
     if (validPin(en)) {
         pinMode(en, OUTPUT);
-        const bool activeLow = (flags & CHARGER_FLAG_ENABLE_ACTIVE_LOW) != 0;
+        const bool activeLow = (flags & OD_CHARGER_FLAG_ENABLE_ACTIVE_LOW) != 0;
         digitalWrite(en, activeLow ? LOW : HIGH);
     }
     const uint8_t st = globalConfig.power_option.charge_state_pin;
@@ -115,7 +115,7 @@ static bool charger_gpio_charging(void) {
     if (!validPin(st)) {
         return false;
     }
-    const bool activeLow = (globalConfig.power_option.charger_flags & CHARGER_FLAG_STATE_ACTIVE_LOW) != 0;
+    const bool activeLow = (globalConfig.power_option.charger_flags & OD_CHARGER_FLAG_STATE_ACTIVE_LOW) != 0;
     const int level = digitalRead(st);
     return activeLow ? (level == HIGH) : (level == LOW);
 }

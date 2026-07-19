@@ -215,7 +215,7 @@ static void write_sht40_msd(uint8_t start, int16_t temp_centi, uint16_t rh_centi
 void initSht40Sensors(void) {
     for (uint8_t i = 0; i < globalConfig.sensor_count; i++) {
         const SensorData* s = &globalConfig.sensors[i];
-        if (s->sensor_type != SENSOR_TYPE_SHT40) {
+        if (s->sensor_type != OD_SENSOR_TYPE_SHT40) {
             continue;
         }
         uint8_t addr = sht40_addr_7bit(s);
@@ -229,7 +229,7 @@ void initSht40Sensors(void) {
     }
     for (uint8_t i = 0; i < globalConfig.sensor_count; i++) {
         const SensorData* s = &globalConfig.sensors[i];
-        if (s->sensor_type == SENSOR_TYPE_SHT40) {
+        if (s->sensor_type == OD_SENSOR_TYPE_SHT40) {
             sht40_probe_bus_once(sht40_bus_id(s));
             break;
         }
@@ -249,7 +249,7 @@ void pollSht40SensorsForMsd(void) {
     havePolled = true;
     for (uint8_t i = 0; i < globalConfig.sensor_count; i++) {
         const SensorData* s = &globalConfig.sensors[i];
-        if (s->sensor_type != SENSOR_TYPE_SHT40) {
+        if (s->sensor_type != OD_SENSOR_TYPE_SHT40) {
             continue;
         }
         uint8_t start = sht40_msd_start(s);
