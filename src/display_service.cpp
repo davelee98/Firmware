@@ -325,7 +325,7 @@ static bool epdSessionUsesSeeed(void) {
 static uint32_t epdKeepAliveWindowMs(void) {
     uint8_t s = globalConfig.power_option.screen_timeout_seconds;
     for (uint8_t i = 0; i < globalConfig.sensor_count; i++) {
-        if (globalConfig.sensors[i].sensor_type == SENSOR_TYPE_AXP2101) {
+        if (globalConfig.sensors[i].sensor_type == OD_SENSOR_TYPE_AXP2101) {
             if (s != 0) {
                 writeSerial("[EPD session] AXP2101 present - keep-alive forced off (screen_timeout_seconds ignored)", true);
             }
@@ -632,7 +632,7 @@ int mapEpd(int id){
         case 0x0040: return EP75YR_800x480;
         case 0x0041: return EP_PANEL_UNDEFINED;
 #ifdef BBEP_T133A01
-        case PANEL_IC_EP133A_SPECTRA_1200X1600: return EP133A_SPECTRA_1200x1600; // 0x0042, Seeed reTerminal E1004
+        case OD_PANEL_IC_EP133A_SPECTRA_1200X1600: return EP133A_SPECTRA_1200x1600; // 0x0042, Seeed reTerminal E1004
 #else
         case 0x0042: return EP_PANEL_UNDEFINED;
 #endif
@@ -656,8 +656,8 @@ bool seeed_driver_used(void) {
 #else
     if (globalConfig.display_count < 1) return false;
     const struct DisplayConfig& d = globalConfig.displays[0];
-    if (d.panel_ic_type != PANEL_IC_SEEED_ED103TC2_1872X1404 &&
-        d.panel_ic_type != PANEL_IC_SEEED_ED103TC2_1872X1404_4GRAY) return false;
+    if (d.panel_ic_type != OD_PANEL_IC_ED103TC2_1872X1404 &&
+        d.panel_ic_type != OD_PANEL_IC_ED103TC2_1872X1404_4GRAY) return false;
     if (d.display_technology != 0 && d.display_technology != 1) return false;
     return true;
 #endif
@@ -666,15 +666,15 @@ bool seeed_driver_used(void) {
 bool e1004_panel_used(void) {
 #ifdef BBEP_T133A01
     if (globalConfig.display_count < 1) return false;
-    return globalConfig.displays[0].panel_ic_type == PANEL_IC_EP133A_SPECTRA_1200X1600;
+    return globalConfig.displays[0].panel_ic_type == OD_PANEL_IC_EP133A_SPECTRA_1200X1600;
 #else
     return false;
 #endif
 }
 
-// reserved_pin_2 / cs_pin_2; 0 or 0xFF defaults to GPIO2.
+// cs_pin_2; 0 or 0xFF defaults to GPIO2.
 uint8_t e1004_cs2_pin(void) {
-    uint8_t p = globalConfig.displays[0].reserved_pin_2;
+    uint8_t p = globalConfig.displays[0].cs_pin_2;
     if (p == 0 || p == 0xFF) return 2;
     return p;
 }
@@ -976,19 +976,19 @@ void initSensors(){
         writeSerial("Initializing sensor " + String(i) + " (instance " + String(sensor->instance_number) + ")", true);
         writeSerial("  Type: 0x" + String(sensor->sensor_type, HEX), true);
         writeSerial("  Bus ID: " + String(sensor->bus_id), true);
-        if(sensor->sensor_type == SENSOR_TYPE_AXP2101){
+        if(sensor->sensor_type == OD_SENSOR_TYPE_AXP2101){
             writeSerial("  Detected AXP2101 PMIC sensor", true);
         }
-        else if(sensor->sensor_type == SENSOR_TYPE_TEMPERATURE){
+        else if(sensor->sensor_type == OD_SENSOR_TYPE_TEMPERATURE){
             writeSerial("  Temperature sensor (initialization not implemented)", true);
         }
-        else if(sensor->sensor_type == SENSOR_TYPE_HUMIDITY){
+        else if(sensor->sensor_type == OD_SENSOR_TYPE_HUMIDITY){
             writeSerial("  Humidity sensor (initialization not implemented)", true);
         }
-        else if(sensor->sensor_type == SENSOR_TYPE_SHT40){
+        else if(sensor->sensor_type == OD_SENSOR_TYPE_SHT40){
             writeSerial("  SHT40 (I2C + MSD slot)", true);
         }
-        else if(sensor->sensor_type == SENSOR_TYPE_BQ27220){
+        else if(sensor->sensor_type == OD_SENSOR_TYPE_BQ27220){
             writeSerial("  BQ27220 fuel gauge (MSD voltage + optional dynamic SOC/status bytes)", true);
         }
         else{
@@ -1444,7 +1444,7 @@ static void renderChar_4BPP(uint8_t* rowBuffer, const uint8_t* fontData, int fon
 }
 
 static void renderChar_2BPP(uint8_t* rowBuffer, const uint8_t* fontData, int fontRow, int charIdx, int startX, int charWidth, int pitch, uint8_t colorScheme, int fontScale) {
-    uint8_t whiteCode = (colorScheme == COLOR_SCHEME_GRAY4) ? 0x03 : 0x01;
+    uint8_t whiteCode = (colorScheme == OD_COLOR_SCHEME_GRAY4) ? 0x03 : 0x01;
     int pixelsPerByte = 4;
     for (int col = 0; col < charWidth; col += pixelsPerByte) {
         uint8_t pixelByte = 0;
@@ -1514,7 +1514,7 @@ void initDisplay(){
         }
         writeSerial(String("Height: ") + String(globalConfig.displays[0].pixel_height), true);
         writeSerial(String("Width: ") + String(globalConfig.displays[0].pixel_width), true);
-        if (! (globalConfig.displays[0].transmission_modes & TRANSMISSION_MODE_CLEAR_ON_BOOT)){
+        if (! (globalConfig.displays[0].transmission_modes & OD_TRANSMISSION_MODE_CLEAR_ON_BOOT)){
             writeBootScreenWithQr();
             writeSerial("EPD refresh: FULL (boot, Seeed)", true);
             touchSuspendForEpdRefresh();
@@ -1543,7 +1543,7 @@ void initDisplay(){
             rotation = 0;  // host bakes rotation into packed image
             if (globalConfig.displays[0].pixel_width != bbep.native_width ||
                 globalConfig.displays[0].pixel_height != bbep.native_height ||
-                globalConfig.displays[0].color_scheme != COLOR_SCHEME_BWGBRY_SPLIT) {
+                globalConfig.displays[0].color_scheme != OD_COLOR_SCHEME_BWGBRY_SPLIT) {
                 writeSerial("ERROR: E1004 requires a 1200x1600 bwgbry_split (8) display config", true);
             } else {
                 e1004GeometryOk = true;
@@ -1554,7 +1554,7 @@ void initDisplay(){
         writeSerial(String("Height: ") + String(globalConfig.displays[0].pixel_height), true);
         writeSerial(String("Width: ") + String(globalConfig.displays[0].pixel_width), true);
         initBbepPanelSession();
-        if (! (globalConfig.displays[0].transmission_modes & TRANSMISSION_MODE_CLEAR_ON_BOOT)){
+        if (! (globalConfig.displays[0].transmission_modes & OD_TRANSMISSION_MODE_CLEAR_ON_BOOT)){
             bool bootOk = refreshBootScreenFull();
             if (!bootOk && !nrfVbusPresent()) {
                 writeSerial("Boot refresh failed on battery — re-powering panel and retrying", true);
@@ -1587,23 +1587,23 @@ void initDisplay(){
 
 int getplane() {
     uint8_t colorScheme = globalConfig.displays[0].color_scheme;
-    if (colorScheme == COLOR_SCHEME_MONO || colorScheme == COLOR_SCHEME_GRAY16) return PLANE_0;
-    if (colorScheme == COLOR_SCHEME_BWR || colorScheme == COLOR_SCHEME_BWY) return PLANE_0;
-    if (colorScheme == COLOR_SCHEME_GRAY4) return PLANE_1;
+    if (colorScheme == OD_COLOR_SCHEME_MONO || colorScheme == OD_COLOR_SCHEME_GRAY16) return PLANE_0;
+    if (colorScheme == OD_COLOR_SCHEME_BWR || colorScheme == OD_COLOR_SCHEME_BWY) return PLANE_0;
+    if (colorScheme == OD_COLOR_SCHEME_GRAY4) return PLANE_1;
     return PLANE_1;
 }
 
 int getBitsPerPixel() {
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
     if (globalConfig.display_count > 0 &&
-        globalConfig.displays[0].panel_ic_type == PANEL_IC_SEEED_ED103TC2_1872X1404_4GRAY) {
+        globalConfig.displays[0].panel_ic_type == OD_PANEL_IC_ED103TC2_1872X1404_4GRAY) {
         return 4;
     }
 #endif
-    if (globalConfig.displays[0].color_scheme == COLOR_SCHEME_BWGBRY ||
-        globalConfig.displays[0].color_scheme == COLOR_SCHEME_BWGBRY_SPLIT) return 4;
-    if (globalConfig.displays[0].color_scheme == COLOR_SCHEME_BWRY) return 2;
-    if (globalConfig.displays[0].color_scheme == COLOR_SCHEME_GRAY4) return 2;
+    if (globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_BWGBRY ||
+        globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_BWGBRY_SPLIT) return 4;
+    if (globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_BWRY) return 2;
+    if (globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_GRAY4) return 2;
     return 1;
 }
 
@@ -1860,7 +1860,7 @@ bool handleDirectWriteCompressedData(uint8_t* data, uint16_t len) {
 // True when the active display uses the bb_epaper 4-gray scheme (two 1-bit
 // controller planes). The Seeed driver path has its own 4bpp handling.
 static inline bool directWriteIsGray4(void) {
-    return (globalConfig.displays[0].color_scheme == COLOR_SCHEME_GRAY4)
+    return (globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_GRAY4)
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
         && !seeed_driver_used()
 #endif
@@ -1946,7 +1946,7 @@ void cleanupDirectWriteState(bool refreshDisplay) {
 // Plane2,Width,Height,TotalBytes}. No panel I/O, no acks. Shared by 0x70 and 0x80.
 static void directWriteComputeGeometry(bool compressed) {
     uint8_t colorScheme = globalConfig.displays[0].color_scheme;
-    directWriteBitplanes = (colorScheme == COLOR_SCHEME_BWR || colorScheme == COLOR_SCHEME_BWY);
+    directWriteBitplanes = (colorScheme == OD_COLOR_SCHEME_BWR || colorScheme == OD_COLOR_SCHEME_BWY);
     directWritePlane2 = false;
     directWriteCompressed = compressed;
     directWriteWidth = globalConfig.displays[0].pixel_width;

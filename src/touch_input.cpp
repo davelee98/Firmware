@@ -145,7 +145,7 @@ static void touch_detach_int_pin(uint8_t pin) {
 static void touch_detach_all_configured_ints(void) {
     for (uint8_t i = 0; i < globalConfig.touch_controller_count && i < 4; i++) {
         const TouchController* tc = &globalConfig.touch_controllers[i];
-        if (tc->touch_ic_type == TOUCH_IC_GT911) {
+        if (tc->touch_ic_type == OD_TOUCH_IC_GT911) {
             touch_detach_int_pin(tc->int_pin);
         }
     }
@@ -357,7 +357,7 @@ static void gt911_clear_status(uint8_t addr7, bool reg_high_first) {
 }
 
 static bool touch_reinit_gt911(uint8_t idx, TouchController* tc, TouchRuntime* rt) {
-    if (tc->touch_ic_type != TOUCH_IC_GT911) {
+    if (tc->touch_ic_type != OD_TOUCH_IC_GT911) {
         return false;
     }
     touch_apply_enable_pin(tc);
@@ -390,7 +390,7 @@ static bool touch_reinit_gt911(uint8_t idx, TouchController* tc, TouchRuntime* r
 }
 
 static bool touch_light_resume_gt911(uint8_t idx, TouchController* tc, TouchRuntime* rt) {
-    if (tc->touch_ic_type != TOUCH_IC_GT911 || !rt->ok || rt->addr7 == 0) {
+    if (tc->touch_ic_type != OD_TOUCH_IC_GT911 || !rt->ok || rt->addr7 == 0) {
         return false;
     }
     if (!touch_ensure_bus(tc)) {
@@ -429,7 +429,7 @@ void touchResumeAfterEpdRefresh(void) {
     for (uint8_t i = 0; i < globalConfig.touch_controller_count; i++) {
         TouchController* tc = &globalConfig.touch_controllers[i];
         TouchRuntime* rt = &s_touch_rt[i];
-        if (tc->touch_ic_type != TOUCH_IC_GT911 || rt->disabled) {
+        if (tc->touch_ic_type != OD_TOUCH_IC_GT911 || rt->disabled) {
             continue;
         }
         if (touch_light_resume_gt911(i, tc, rt)) {
@@ -443,7 +443,7 @@ void touchResumeAfterEpdRefresh(void) {
 }
 
 static void apply_touch_map(const TouchController* t, uint16_t* x, uint16_t* y) {
-    if (t->flags & TOUCH_FLAG_SWAP_XY) {
+    if (t->flags & OD_TOUCH_FLAG_SWAP_XY) {
         uint16_t tmp = *x;
         *x = *y;
         *y = tmp;
@@ -454,10 +454,10 @@ static void apply_touch_map(const TouchController* t, uint16_t* x, uint16_t* y) 
         w = globalConfig.displays[t->display_instance].pixel_width;
         h = globalConfig.displays[t->display_instance].pixel_height;
     }
-    if (t->flags & TOUCH_FLAG_INVERT_X && w > 0) {
+    if (t->flags & OD_TOUCH_FLAG_INVERT_X && w > 0) {
         *x = (w > *x) ? (w - 1u - *x) : 0;
     }
-    if (t->flags & TOUCH_FLAG_INVERT_Y && h > 0) {
+    if (t->flags & OD_TOUCH_FLAG_INVERT_Y && h > 0) {
         *y = (h > *y) ? (h - 1u - *y) : 0;
     }
     if (w > 0 && *x >= w) {
@@ -480,7 +480,7 @@ void initTouchInput(void) {
     }
     uint8_t enabled = 0;
     for (uint8_t j = 0; j < globalConfig.touch_controller_count; j++) {
-        if (globalConfig.touch_controllers[j].touch_ic_type != TOUCH_IC_NONE) {
+        if (globalConfig.touch_controllers[j].touch_ic_type != OD_TOUCH_IC_NONE) {
             enabled++;
         }
     }
@@ -493,11 +493,11 @@ void initTouchInput(void) {
     for (uint8_t i = 0; i < globalConfig.touch_controller_count; i++) {
         TouchController* tc = &globalConfig.touch_controllers[i];
         TouchRuntime* rt = &s_touch_rt[i];
-        if (tc->touch_ic_type == TOUCH_IC_NONE) {
+        if (tc->touch_ic_type == OD_TOUCH_IC_NONE) {
             continue;
         }
-        if (tc->touch_ic_type != TOUCH_IC_GT911) {
-            if (tc->touch_ic_type != TOUCH_IC_NONE) {
+        if (tc->touch_ic_type != OD_TOUCH_IC_GT911) {
+            if (tc->touch_ic_type != OD_TOUCH_IC_NONE) {
                 writeSerial("Touch[" + String(i) + "]: skipped (only GT911=1 implemented, got " + String(tc->touch_ic_type) + ")", true);
             }
             continue;
@@ -565,7 +565,7 @@ bool touch_input_gpio_is_touch_int(uint8_t pin) {
     }
     for (uint8_t i = 0; i < globalConfig.touch_controller_count; i++) {
         const TouchController* tc = &globalConfig.touch_controllers[i];
-        if (tc->touch_ic_type == TOUCH_IC_GT911 && tc->int_pin == pin) {
+        if (tc->touch_ic_type == OD_TOUCH_IC_GT911 && tc->int_pin == pin) {
             return true;
         }
     }
@@ -589,7 +589,7 @@ void processTouchInput(void) {
     for (uint8_t i = 0; i < globalConfig.touch_controller_count; i++) {
         TouchController* tc = &globalConfig.touch_controllers[i];
         TouchRuntime* rt = &s_touch_rt[i];
-        if (tc->touch_ic_type != TOUCH_IC_GT911 || !rt->ok || rt->disabled) {
+        if (tc->touch_ic_type != OD_TOUCH_IC_GT911 || !rt->ok || rt->disabled) {
             continue;
         }
 

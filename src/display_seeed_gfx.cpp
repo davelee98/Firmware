@@ -15,8 +15,8 @@
 
 extern struct GlobalConfig globalConfig;
 
-#ifndef TRANSMISSION_MODE_DIRECT_WRITE
-#define TRANSMISSION_MODE_DIRECT_WRITE (1 << 3)
+#ifndef OD_TRANSMISSION_MODE_DIRECT_WRITE
+#define OD_TRANSMISSION_MODE_DIRECT_WRITE (1 << 3)
 #endif
 
 static int8_t seeed_gfx_aux_pin(uint8_t p, int8_t default_gpio) {
@@ -51,8 +51,8 @@ void opendisplay_seeed_gfx_load_pins_from_display(const struct DisplayConfig* d,
     if (!d) return;
 
     switch (panel_ic_type) {
-        case PANEL_IC_SEEED_ED103TC2_1872X1404:
-        case PANEL_IC_SEEED_ED103TC2_1872X1404_4GRAY:
+        case OD_PANEL_IC_ED103TC2_1872X1404:
+        case OD_PANEL_IC_ED103TC2_1872X1404_4GRAY:
             if (d->clk_pin != 0xFF) opnd_seeed_runtime_sclk = (int8_t)d->clk_pin;
             if (d->data_pin != 0xFF) opnd_seeed_runtime_mosi = (int8_t)d->data_pin;
             if (d->dc_pin != 0xFF) opnd_seeed_runtime_miso = (int8_t)d->dc_pin;
@@ -81,7 +81,7 @@ static bool seeed_gfx_hw_initialized = false;
 
 static bool seeed_gfx_panel_is_4gray(void) {
     if (globalConfig.display_count < 1) return false;
-    return globalConfig.displays[0].panel_ic_type == PANEL_IC_SEEED_ED103TC2_1872X1404_4GRAY;
+    return globalConfig.displays[0].panel_ic_type == OD_PANEL_IC_ED103TC2_1872X1404_4GRAY;
 }
 
 static size_t fb_byte_size(void) {

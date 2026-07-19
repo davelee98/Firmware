@@ -7,7 +7,7 @@
 extern struct GlobalConfig globalConfig;
 void sendResponse(uint8_t* response, uint16_t len);
 
-static_assert(sizeof(PassiveBuzzerConfig) == 32, "PassiveBuzzerConfig must be 32 bytes");
+static_assert(sizeof(BuzzerConfig) == 32, "BuzzerConfig must be 32 bytes");
 
 // Playable frequency window (old 400 Hz / 12 000 Hz limits, now centi-Hz).
 static constexpr uint32_t kBuzzerFreqMinCentiHz = 40000u;      // 400.00 Hz
@@ -101,18 +101,18 @@ static uint32_t buzzer_index_to_centihz(uint8_t idx) {
     return kBuzzerCentiHzTable[buzzer_fold_index(idx)];
 }
 
-static void buzzer_set_enable(const PassiveBuzzerConfig* b, bool on) {
+static void buzzer_set_enable(const BuzzerConfig* b, bool on) {
     if (b->enable_pin == 0xFF) {
         return;
     }
     bool high = on;
-    if ((b->flags & BUZZER_FLAG_ENABLE_ACTIVE_HIGH) == 0) {
+    if ((b->flags & OD_BUZZER_FLAG_ENABLE_ACTIVE_HIGH) == 0) {
         high = !high;
     }
     digitalWrite(b->enable_pin, high ? HIGH : LOW);
 }
 
-static void buzzer_drive_off(const PassiveBuzzerConfig* b) {
+static void buzzer_drive_off(const BuzzerConfig* b) {
     pinMode(b->drive_pin, OUTPUT);
     digitalWrite(b->drive_pin, LOW);
 }
@@ -128,7 +128,7 @@ typedef enum {
 
 static struct {
     bool active;
-    PassiveBuzzerConfig* b;
+    BuzzerConfig* b;
     uint8_t melody[256];      // copied payload: [inst][outer][pattern_count][patterns...]
     uint16_t melody_len;
     uint8_t outer;            // total outer repeats
@@ -253,7 +253,7 @@ void buzzerService(void) {
 
 void initPassiveBuzzers(void) {
     for (uint8_t i = 0; i < globalConfig.passive_buzzer_count; i++) {
-        const PassiveBuzzerConfig* b = &globalConfig.passive_buzzers[i];
+        const BuzzerConfig* b = &globalConfig.passive_buzzers[i];
         if (b->drive_pin == 0xFF) {
             continue;
         }
@@ -278,7 +278,7 @@ void handleBuzzerActivate(uint8_t* data, uint16_t len) {
         sendResponse(err, sizeof(err));
         return;
     }
-    PassiveBuzzerConfig* b = &globalConfig.passive_buzzers[inst];
+    BuzzerConfig* b = &globalConfig.passive_buzzers[inst];
     if (b->drive_pin == 0xFF) {
         uint8_t err[] = {RESP_NACK, RESP_BUZZER_ACK, 0x03, 0x00};
         sendResponse(err, sizeof(err));
@@ -352,7 +352,7 @@ void passiveBuzzerPowerOffAlert(void) {
     // Preempt any active melody so the shutdown chirp always sounds.
     buzzer_stop_internal();
 
-    const PassiveBuzzerConfig* b = nullptr;
+    const BuzzerConfig* b = nullptr;
     for (uint8_t i = 0; i < globalConfig.passive_buzzer_count; i++) {
         const uint8_t pin = globalConfig.passive_buzzers[i].drive_pin;
         if (pin != 0 && pin != 0xFF) {

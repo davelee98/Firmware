@@ -80,7 +80,7 @@ void warnUnarmedPins(uint64_t mask, const char* reason) {
 }  // namespace
 
 void armButtonWakeSources() {
-    if (globalConfig.power_option.sleep_flags & SLEEP_FLAG_BUTTON_WAKE_DISABLE) {
+    if (globalConfig.power_option.sleep_flags & OD_SLEEP_FLAG_BUTTON_WAKE_DISABLE) {
         writeSerial("Button wake disabled (sleep_flags) - timer-only deep sleep");
         return;
     }
