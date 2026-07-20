@@ -72,6 +72,9 @@ extern bool wifiServerConnected;
 extern ResponseQueueItem responseQueue[10];
 extern uint8_t responseQueueHead;
 extern uint8_t responseQueueTail;
+// Drains the response ring to BLE (defined in main.cpp). handleReadConfig() calls
+// this between chunks so a multi-chunk config read never overflows the ring.
+extern void flushResponseQueueToBle();
 static constexpr uint8_t RESPONSE_QUEUE_SIZE_LOCAL = 10;
 static constexpr uint16_t MAX_RESPONSE_SIZE_LOCAL = 512;
 
@@ -381,7 +384,11 @@ void handleReadConfig() {
             remaining -= chunkSize;
             chunkNumber++;
 #ifdef TARGET_ESP32
-            delay(1);
+            // Drain THIS chunk to BLE before enqueuing the next: this handler runs
+            // synchronously on the loop task, so the ring's only drainer cannot run
+            // until we return. Without this, chunk 9+ overflows the 10-slot ring and
+            // is silently dropped, truncating configs > ~864 B on read-back.
+            flushResponseQueueToBle();
 #else
             delay(50);
 #endif
