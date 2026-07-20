@@ -214,7 +214,7 @@ void sendResponse(uint8_t* response, uint16_t len) {
         // is also the first two bytes of the dump). Replaces the old 4-line block.
         uint16_t cmd = (response[0] << 8) | response[1];
         char head[32];
-        snprintf(head, sizeof(head), "TX 0x%04X (%u B):", cmd, (unsigned)len);
+        snprintf(head, sizeof(head), "BLE: TX 0x%04X (%u B):", cmd, (unsigned)len);
         String line = head;
         for (int i = 0; i < len && i < 32; i++) {
             char b[4];
