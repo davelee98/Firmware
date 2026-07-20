@@ -210,17 +210,19 @@ void sendResponse(uint8_t* response, uint16_t len) {
     }
 
     if (!quietAck) {
-        writeSerial("Sending response:", true);
-        writeSerial("  Length: " + String(len) + " bytes", true);
-        writeSerial("  Command: 0x" + String(response[0], HEX) + String(response[1], HEX), true);
-        String hexDump = "  Full command: ";
+        // One-line TX log: opcode, length, and up to 32 payload bytes (the opcode
+        // is also the first two bytes of the dump). Replaces the old 4-line block.
+        uint16_t cmd = (response[0] << 8) | response[1];
+        char head[32];
+        snprintf(head, sizeof(head), "TX 0x%04X (%u B):", cmd, (unsigned)len);
+        String line = head;
         for (int i = 0; i < len && i < 32; i++) {
-            if (i > 0) hexDump += " ";
-            if (response[i] < 16) hexDump += "0";
-            hexDump += String(response[i], HEX);
+            char b[4];
+            snprintf(b, sizeof(b), " %02X", response[i]);
+            line += b;
         }
-        if (len > 32) hexDump += " ...";
-        writeSerial(hexDump, true);
+        if (len > 32) line += " ...";
+        writeSerial(line, true);
     }
 #ifdef TARGET_ESP32
     send_wifi_lan_frame(response, len);
@@ -313,7 +315,6 @@ const char* getFirmwareShaString() {
 }
 
 void handleFirmwareVersion() {
-    writeSerial("Building Firmware Version response...", true);
     uint8_t major = getFirmwareMajor();
     uint8_t minor = getFirmwareMinor();
     String shaStr = String(getFirmwareShaString());
@@ -344,14 +345,12 @@ void handleFirmwareVersion() {
         response[offset++] = shaStr.charAt(i);
     }
     sendResponse(response, offset);
-    writeSerial("Firmware version response sent", true);
 }
 
 void handleReadConfig() {
     uint8_t configData[4096];
     uint32_t configLen = 4096;
     if (loadConfig(configData, &configLen)) {
-        writeSerial("Sending config data in chunks...", true);
         uint32_t remaining = configLen;
         uint32_t offset = 0;
         uint16_t chunkNumber = 0;
@@ -635,7 +634,6 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
         case CMD_CONFIG_READ:         // 0x0040
             writeSerial("Command received at time: " + String(millis()));
             handleReadConfig();
-            writeSerial("Returned from handleReadConfig");
             break;
         case CMD_CONFIG_WRITE:        // 0x0041
             handleWriteConfig(data + 2, len - 2);
@@ -696,5 +694,4 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
             writeSerial("ERROR: Unknown command: 0x" + String(command, HEX));
             break;
     }
-    if (!quietCmd) writeSerial("Command processing completed successfully");
 }
