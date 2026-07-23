@@ -124,7 +124,12 @@ static void esp32_queue_ble_notify_copy(const uint8_t* response, uint16_t len, b
     responseQueue[responseQueueHead].len = len;
     responseQueue[responseQueueHead].pending = true;
     responseQueueHead = nextHead;
-    if (!quiet) writeSerial("BLE: response queued (queue size: " + String((responseQueueHead - responseQueueTail + RESPONSE_QUEUE_SIZE_LOCAL) % RESPONSE_QUEUE_SIZE_LOCAL) + ")", true);
+    // The "[BLE][Q:n] TX ..." line above already reports every response and its
+    // queue depth, so the nominal enqueue (depth 1, drained next loop pass) is
+    // pure noise. Log only when a backlog is forming and the 10-slot ring is at
+    // risk of dropping responses.
+    const uint8_t depth = (responseQueueHead - responseQueueTail + RESPONSE_QUEUE_SIZE_LOCAL) % RESPONSE_QUEUE_SIZE_LOCAL;
+    if (!quiet && depth >= 2) writeSerial("BLE: response queue backlog (queue size: " + String(depth) + ")", true);
 }
 #endif
 
@@ -242,7 +247,15 @@ void sendResponse(uint8_t* response, uint16_t len) {
         // One-line TX log: opcode, length, and up to 32 payload bytes (the opcode
         // is also the first two bytes of the dump). Replaces the old 4-line block.
         uint16_t cmd = (response[0] << 8) | response[1];
-        char head[48];
+        char head[64];
+#ifdef TARGET_ESP32
+        // Queue depth *before* this response is enqueued, so a healthy path reads
+        // [BLE][Q:0] and a rising Q flags the drain falling behind the producer.
+        if (g_commandOrigin == ORIGIN_BLE) {
+            const uint8_t qdepth = (responseQueueHead - responseQueueTail + RESPONSE_QUEUE_SIZE_LOCAL) % RESPONSE_QUEUE_SIZE_LOCAL;
+            snprintf(head, sizeof(head), "[%s][Q:%u] TX 0x%04X (%u B):", originTag(), (unsigned)qdepth, cmd, (unsigned)len);
+        } else
+#endif
         snprintf(head, sizeof(head), "[%s] TX 0x%04X (%u B):", originTag(), cmd, (unsigned)len);
         String line = head;
         for (int i = 0; i < len && i < 32; i++) {

@@ -264,11 +264,13 @@ void flushResponseQueueToBle() {
             }
             responseQueue[responseQueueTail].pending = false;
             responseQueueTail = (responseQueueTail + 1) % RESPONSE_QUEUE_SIZE;
-            // One line per drained response, reporting the remaining queue depth
-            // (replaces the old "Sending queued response" + "Response sent successfully").
+            // The "[BLE][Q:n] TX ..." line in sendResponse() already logs every
+            // response with its queue depth, so the nominal drain (depth back to
+            // 0) is redundant. Report only the interesting case: entries still
+            // queued after this notify, i.e. the drain is behind the producer.
             if (!quietAck) {
                 uint8_t depth = (responseQueueHead - responseQueueTail + RESPONSE_QUEUE_SIZE) % RESPONSE_QUEUE_SIZE;
-                writeSerial("BLE Response Sent (queue size: " + String(depth) + ")");
+                if (depth > 0) writeSerial("BLE Response Sent (queue size: " + String(depth) + ")");
             }
             bleDrain++;
         }
