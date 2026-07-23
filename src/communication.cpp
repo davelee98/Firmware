@@ -49,7 +49,10 @@ static void reloadConfigAfterSave(void) {
     }
     clearEncryptionSession();
 #ifdef OPENDISPLAY_HAS_WIFI
-    initWiFi();
+    // Non-blocking: a config write arrives over a live BLE link, and the blocking
+    // form stalls the loop task for up to 36 s of connect retries, freezing BLE
+    // command processing. handleWiFiServer() starts the LAN server on association.
+    initWiFi(false);
 #endif
 }
 bool encryptResponse(uint8_t* plaintext, uint16_t plaintext_len, uint8_t* ciphertext,

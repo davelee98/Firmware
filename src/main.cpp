@@ -93,7 +93,12 @@ void setup() {
     #endif
     writeSerial("Starting setup...");
     if (is_deep_sleep_wake) { writeSerial("[wake] >> full_config_init"); flushLog(); }
+    // A wake re-parses the same stored config the previous boot already dumped, so
+    // skip the informational dump here (errors/warnings still print). Cleared right
+    // after, so a later BLE config write still logs what it parsed.
+    setConfigLoggingQuiet(is_deep_sleep_wake);
     full_config_init();
+    setConfigLoggingQuiet(false);
     if (is_deep_sleep_wake) { writeSerial("[wake] << full_config_init >> initio"); flushLog(); }
     initio();
 #ifdef TARGET_NRF

@@ -76,10 +76,12 @@ static uint16_t lanBasePort(void) {
     return (wifiServerPort != 0) ? wifiServerPort : (uint16_t)OD_LAN_TCP_PORT;
 }
 // Active LAN port: plaintext -> base; TLS -> base+1 (derived, no config field).
-static uint16_t lanActivePort(void) {
+uint16_t lanActivePort(void) {
     uint16_t base = lanBasePort();
     return isEncryptionEnabled() ? (uint16_t)(base + 1) : base;
 }
+
+bool lanTlsEnabled(void) { return isEncryptionEnabled(); }
 
 // mbedTLS BIO shims over the accepted WiFiClient (non-blocking cooperative model).
 static int tls_bio_send(void* ctx, const unsigned char* buf, size_t len) {
@@ -264,17 +266,43 @@ static void startLanServer(void) {
     restartLanService();
 }
 
+// WiFi.status() collapses every association failure into WL_DISCONNECTED (6), which
+// is useless for field diagnosis. Log the 802.11/ESP reason code instead: 201
+// (NO_AP_FOUND) means the SSID was never seen -- typically a 5 GHz-only or hidden
+// network; 15 (4WAY_HANDSHAKE_TIMEOUT) / 202 (AUTH_FAIL) mean a bad password; 200
+// (BEACON_TIMEOUT) / 4 (ASSOC_EXPIRE) point at range or BLE coexistence.
+static bool wifiDiagEventsRegistered = false;
+
+static void onWiFiDiagEvent(arduino_event_id_t event, arduino_event_info_t info) {
+    switch (event) {
+        case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+            writeSerial("WiFi event: associated (channel " +
+                        String(info.wifi_sta_connected.channel) + ")");
+            break;
+        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+            writeSerial("WiFi event: disconnected, reason " +
+                        String(info.wifi_sta_disconnected.reason));
+            break;
+        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+            writeSerial("WiFi event: got IP " + IPAddress(info.got_ip.ip_info.ip.addr).toString());
+            break;
+        default:
+            break;
+    }
+}
+
+static void registerWiFiDiagEvents(void) {
+    if (wifiDiagEventsRegistered) return;
+    WiFi.onEvent(onWiFiDiagEvent);
+    wifiDiagEventsRegistered = true;
+}
+
 void initWiFi(bool waitForConnection) {
     writeSerial("=== Initializing WiFi ===");
 
-    // F5 -- do not bring WiFi up on battery power (power_mode == 1). WiFi is a
-    // mains/USB-time transport; on battery the radio cost is not justified and the
-    // device relies on BLE. power_mode 0 = mains/USB (or unset), 1 = battery.
-    if (globalConfig.power_option.power_mode == 1) {
-        writeSerial("WiFi: skipped on battery power (power_mode == 1)");
-        wifiInitialized = false;
-        return;
-    }
+    // WiFi is NOT gated on power_mode: if COMM_MODE_WIFI is enabled the radio comes
+    // up on battery too. Radio cost on battery is managed by WIFI_PS_MIN_MODEM
+    // (below) and by deep sleep, not by refusing to associate.
     if (!(globalConfig.system_config.communication_modes & COMM_MODE_WIFI)) {
         writeSerial("WiFi not enabled in communication_modes, skipping");
         wifiInitialized = false;
@@ -294,14 +322,16 @@ void initWiFi(bool waitForConnection) {
     }
     // Do not log the SSID or password (credentials); log only presence/length.
     writeSerial("WiFi: connecting to configured SSID (len " + String(strlen(wifiSsid)) + ")");
+    registerWiFiDiagEvents();
     WiFi.setAutoReconnect(true);
-    WiFi.setTxPower(WIFI_POWER_15dBm);
     wifiSsid[32] = '\0';
     wifiPassword[32] = '\0';
     writeSerial("Encryption type: 0x" + String(wifiEncryptionType, HEX));
     wifiConnected = false;
     wifiInitialized = true;
     WiFi.begin(wifiSsid, wifiPassword);
+    // Tx power can only be set once the STA is started, i.e. after begin(); the
+    // pre-begin() call this replaces failed with ESP_ERR_WIFI_NOT_START.
     WiFi.setTxPower(WIFI_POWER_15dBm);
     if (!waitForConnection) {
         writeSerial("WiFi: STA started (non-blocking; LAN starts when associated)");

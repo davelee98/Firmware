@@ -29,6 +29,11 @@ void opendisplay_lan_teardown(void);
 void opendisplay_lan_send_frame(const uint8_t* payload, uint16_t len);
 /// True while a LAN client is connected (plaintext or TLS).
 bool wifiLanClientConnected(void);
+/// Port the LAN listener binds: WifiConfig.server_port (or OD_LAN_TCP_PORT when 0),
+/// +1 when the TLS-PSK channel is active. Derived, never configured directly.
+uint16_t lanActivePort(void);
+/// True when the LAN channel is TLS-PSK rather than plaintext (= isEncryptionEnabled()).
+bool lanTlsEnabled(void);
 
 #endif
 

@@ -148,7 +148,7 @@ bool wifiConnected = false;
 bool wifiInitialized = false;
 char wifiServerUrl[65] = {0};
 uint16_t wifiServerPort = 2446;
-bool wifiServerConfigured = false;
+// bool wifiServerConfigured = false;  // dead -- nothing reads it (config_parser.cpp)
 #endif
 #ifdef OPENDISPLAY_HAS_WIFI
 // Heavy WiFi-transport surface: the TCP server/client objects and the 8 KB RX
