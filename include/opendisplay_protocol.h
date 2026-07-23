@@ -53,6 +53,13 @@
  *            new version heading on each bump -- see AGENT INSTRUCTIONS below)
  * --------------------------------------------------------------------------
  *   Unreleased (since 2.2)
+ *     - LAN framing: cap the WIRE frame ([len:2 LE] prefix + payload) at a new
+ *       constant OD_LAN_MAX_FRAME (4096); OD_LAN_MAX_PAYLOAD is now DERIVED as
+ *       OD_LAN_MAX_FRAME - 2 = 4094 (was a standalone 4096, which made the max
+ *       wire frame an awkward 4098). Senders MUST keep payloads <= 4094 and
+ *       receivers MUST reject len > 4094. Breaking only for senders that framed
+ *       4095/4096-byte payloads (none deployed); max DIRECT_WRITE chunk data on
+ *       LAN is now OD_LAN_MAX_PAYLOAD - 2 = 4092.
  *     - Add each further wire-spec change here as it lands. On the next version
  *       bump, move these under a new "MAJOR.MINOR (YYYY-MM-DD)" heading.
  *
@@ -890,8 +897,12 @@
  *     - payload : one command/response frame, EXACTLY as on BLE but WITHOUT the
  *                 GATT MTU segmentation -- i.e. [cmd_hi][cmd_lo][payload...] for
  *                 a request, [status][cmd_echo][data...] for a response.
- *     - Valid payload length is 1..OD_LAN_MAX_PAYLOAD (len == 0 is invalid; len
- *       > OD_LAN_MAX_PAYLOAD MUST be rejected and the connection dropped).
+ *     - The complete WIRE frame (2-byte prefix + payload) MUST NOT exceed
+ *       OD_LAN_MAX_FRAME (4096); equivalently, valid payload length is
+ *       1..OD_LAN_MAX_PAYLOAD (= OD_LAN_MAX_FRAME - 2 = 4094). len == 0 is
+ *       invalid; len > OD_LAN_MAX_PAYLOAD MUST be rejected and the connection
+ *       dropped. Capping the WIRE frame (not the payload) at a power of two is
+ *       deliberate: receiver buffers sized in wire bytes divide evenly.
  *   A reader MUST handle partial and coalesced TCP reads: read exactly 2 bytes
  *   for len, then exactly len bytes for the payload.
  *
@@ -950,7 +961,8 @@
  * ========================================================================== */
 #define OD_LAN_TCP_PORT                2446u   /* DEFAULT plaintext port; live port = WifiConfig.server_port (this default if 0) */
 #define OD_LAN_TLS_PORT                2447u   /* DEFAULT TLS-PSK port; DERIVED live = server_port + 1 (== OD_LAN_TCP_PORT + 1) */
-#define OD_LAN_MAX_PAYLOAD             4096u   /* max payload bytes after the [len:2 LE] frame prefix */
+#define OD_LAN_MAX_FRAME               4096u   /* max WIRE frame: [len:2 LE] prefix + payload, inclusive */
+#define OD_LAN_MAX_PAYLOAD             (OD_LAN_MAX_FRAME - 2u)   /* max payload bytes (4094) after the prefix */
 #define OD_LAN_MDNS_SERVICE            "_opendisplay._tcp"  /* DNS-SD service; FQDN "_opendisplay._tcp.local." */
 #define OD_LAN_READ_TIMEOUT_S          30u     /* idle timeout: drop a client after this many seconds of no traffic */
 
