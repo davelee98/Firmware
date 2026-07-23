@@ -79,11 +79,26 @@ static uint32_t lastLanActivityMs = 0;  // for the OD_LAN_READ_TIMEOUT_S idle dr
 // so suspend is origin-gated at START and restore is unconditional everywhere else.
 static bool lanPsSuspended = false;
 
+// INTENTIONAL NO-OP -- do NOT re-enable WIFI_PS_NONE here.
+//
+// This was meant to dodge a DTIM ack-ladder stall by dropping modem sleep for the
+// duration of a LAN transfer. On this hardware WiFi and BLE share ONE radio and
+// software coexistence is compiled in (CONFIG_SW_COEXIST_ENABLE). The coex arbiter
+// relies on WiFi's modem-sleep (WIFI_PS_MIN_MODEM) windows to time-share the antenna
+// with the always-on BLE advertiser. WIFI_PS_NONE tells the AP "I never sleep, send
+// anytime", which is a lie under coex: BLE still periodically steals the radio, so the
+// AP fires downlink into windows where the device is off-channel. Those frames are
+// dropped at the PHY -> TCP retransmit + backoff on nearly every packet -> throughput
+// collapses to a crawl (measured on hardware, 2026-07-23). It hits WiFi in BOTH
+// directions (inbound data AND outbound acks), even though the transfer never touches
+// BLE -- BLE only has to EXIST for coex to be active.
+//
+// The DTIM stall it was chasing was measured negligible, so there is nothing to trade
+// off: the radio stays at the default WIFI_PS_MIN_MODEM for the whole session. The
+// function and its restore/safety-net machinery are retained as harmless no-ops
+// (lanPsSuspended never flips true) so the call sites and hook stay in place.
 void lanPowerSaveSuspend(void) {
-    if (lanPsSuspended || !wifiConnected) return;
-    esp_wifi_set_ps(WIFI_PS_NONE);
-    lanPsSuspended = true;
-    writeSerial("LAN: power save OFF (WIFI_PS_NONE) for transfer");
+    // Deliberately does not touch esp_wifi_set_ps(). See the note above.
 }
 
 void lanPowerSaveRestore(void) {
