@@ -541,12 +541,9 @@ bool loadGlobalConfig(){
 #endif
                     wifiConfigured = true;
                     writeSerial("=== WiFi Configuration Loaded ===");
-                    writeSerial("SSID: \"" + String(wifiSsid) + "\"");
-                    if (passwordLen > 0) {
-                        writeSerial("Password: \"" + String(wifiPassword) + "\"");
-                    } else {
-                        writeSerial("Password: (empty)");
-                    }
+                    // Do NOT log the SSID or password (credentials). Log presence/length only.
+                    writeSerial("SSID: (set, " + String(ssidLen) + " chars)");
+                    writeSerial(passwordLen > 0 ? "Password: (set)" : "Password: (empty)");
                     String encTypeStr = "Unknown";
                     switch (wifiEncryptionType) {
                         case 0x00: encTypeStr = "None (Open)"; break;
@@ -643,7 +640,7 @@ void printConfigSummary(){
     #ifdef TARGET_ESP32
     if (globalConfig.system_config.communication_modes & COMM_MODE_WIFI) {
         if (wifiConfigured) {
-            writeSerial("  WiFi SSID: \"" + String(wifiSsid) + "\"");
+            writeSerial("  WiFi SSID: (configured)");  // credential; not logged verbatim
             if (wifiInitialized) {
                 if (wifiConnected) {
                     writeSerial("  WiFi Status: Connected (IP: " + WiFi.localIP().toString() + ")");
