@@ -15,4 +15,10 @@ void handleReadConfig();
 void handleWriteConfig(uint8_t* data, uint16_t len);
 void handleWriteConfigChunk(uint8_t* data, uint16_t len);
 
+// Origin of the command currently being dispatched: 0 = BLE, 1 = LAN plaintext,
+// 2 = LAN TLS. Set by the LAN listener around each dispatch and ORIGIN_BLE at all
+// other times. Multi-frame transfers use it to reject frames from a transport that
+// does not own the in-flight session.
+uint8_t commandOrigin(void);
+
 #endif

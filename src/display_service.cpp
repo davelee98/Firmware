@@ -1785,7 +1785,9 @@ void updatemsdata(){
             pAdvertising->start();
         }
     }
+#ifdef OPENDISPLAY_HAS_WIFI
     opendisplay_mdns_update_msd_txt();
+#endif
 #endif
     mloopcounter++;
     mloopcounter &= 0x0F;
@@ -1828,7 +1830,12 @@ static void imageWriteLogReset(void) {
 static void imageWriteLogStart(uint32_t totalBytes) {
     imgLogTotalBytes = totalBytes;
     imgLogStartMs = millis();
-    writeSerial("DW start: " + String(totalBytes) + " bytes expected", true);
+    // Whether the sender compressed is decided per transfer (START header flag), not
+    // by config, so the transmission_modes dump at boot does not answer it. State the
+    // active mode here: without it a slow push is ambiguous between "sent raw" and
+    // "compressed but the link is the bottleneck".
+    writeSerial("DW start: " + String(totalBytes) + " bytes expected, " +
+                (directWriteCompressed ? "zlib streaming" : "raw (uncompressed)"), true);
 }
 
 static void imageWriteLogChunk(const uint8_t* data, uint16_t len) {
@@ -1862,8 +1869,18 @@ static void imageWriteLogFinish(uint32_t written, uint32_t total) {
     uint32_t elapsedMs = millis() - imgLogStartMs;   // unsigned wrap-safe over one stream
     String rate = "n/a";
     if (elapsedMs > 0) rate = String((float)written / 1.024f / (float)elapsedMs, 1);  // bytes/ms /1.024 = KB/s
+    String mode = " raw";
+    if (directWriteCompressed) {
+        // On-wire bytes vs bytes handed to the panel: the ratio is the only direct
+        // evidence the stream actually inflated, and it makes a mis-sized or
+        // already-compressed payload obvious.
+        mode = " zlib " + String(directWriteCompressedReceived) + " B on wire";
+        if (directWriteCompressedReceived > 0 && written > 0) {
+            mode += " (" + String((float)written / (float)directWriteCompressedReceived, 2) + "x)";
+        }
+    }
     writeSerial("DW complete: " + String(imgLogChunks) + " chunks, " +
-                String(written) + "/" + String(total) + " bytes, " +
+                String(written) + "/" + String(total) + " bytes," + mode + ", " +
                 String(elapsedMs / 1000.0f, 2) + " s, " + rate + " KB/s", true);
 }
 
@@ -2048,7 +2065,31 @@ static void directWriteActivatePanel(void) {
     }
 }
 
+// ------------------------------------------------------- session ownership ---
+// Transfer state (directWriteActive, the zlib window, pipeState, partialCtx, panel
+// power) is a single global set, while g_commandOrigin is per-FRAME. Without an
+// owner recorded at START, a frame from the other transport joins the in-flight
+// session -- feeding a BLE chunk into a LAN transfer's zlib stream corrupts it
+// silently, and its ack goes back to the injector rather than the owning client.
+// The same gap lets a BLE disconnect tear down a live LAN transfer (see
+// transferSessionOrigin() use in main.cpp's serviceBleDisconnectCleanup).
+static uint8_t sessionOrigin = 0;   // ORIGIN_BLE
+
+uint8_t transferSessionOrigin(void) { return sessionOrigin; }
+
+// True when the frame being dispatched belongs to the transport that opened the
+// session. Logs once per rejected frame: silent discard is what made this class of
+// corruption invisible in the first place.
+static bool frameOwnsSession(const char* what) {
+    if (commandOrigin() == sessionOrigin) return true;
+    writeSerial("WARNING: " + String(what) + " frame from origin " +
+                String((int)commandOrigin()) + " dropped; session owned by origin " +
+                String((int)sessionOrigin), true);
+    return false;
+}
+
 void handleDirectWriteStart(uint8_t* data, uint16_t len) {
+    sessionOrigin = commandOrigin();
     if (partialCtx.active) cleanup_partial_write_state();
     if (directWriteActive) {
         cleanupDirectWriteState(false);
@@ -2089,6 +2130,7 @@ void handleDirectWriteStart(uint8_t* data, uint16_t len) {
 }
 
 void handlePartialWriteStart(uint8_t* data, uint16_t len) {
+    sessionOrigin = commandOrigin();
     if (directWriteActive) cleanupDirectWriteState(false);
     if (partialCtx.active) cleanup_partial_write_state();
     resetPipeWriteState();
@@ -2194,6 +2236,7 @@ void handleDirectWriteData(uint8_t* data, uint16_t len) {
     if (pipeState.active) return;
     if (partialCtx.active) {
         if (len == 0) return;
+        if (!frameOwnsSession("0x0071 (partial)")) return;
         imageWriteLogChunk(data, len);
         if (!partial_consume_bytes(data, (uint32_t)len)) {
             send_direct_write_nack(RESP_DIRECT_WRITE_DATA_ACK, OD_ERR_PARTIAL_STREAM, true);
@@ -2205,6 +2248,7 @@ void handleDirectWriteData(uint8_t* data, uint16_t len) {
         return;
     }
     if (!directWriteActive || len == 0) return;
+    if (!frameOwnsSession("0x0071")) return;
     imageWriteLogChunk(data, len);
     if (directWriteCompressed) {
         if (!handleDirectWriteCompressedData(data, len)) {
@@ -2248,6 +2292,7 @@ void handleDirectWriteEnd(uint8_t* data, uint16_t len) {
     // finalize/refresh a pipe-owned session (partial would commit new_etag==0 and
     // leave pipeState zombied; full-frame would refresh with pipeState still active).
     if (pipeState.active) return;
+    if ((directWriteActive || partialCtx.active) && !frameOwnsSession("0x0072")) return;
     if (partialCtx.active) {
         if (data != nullptr && len > 1) {
             send_direct_write_nack(RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true);
@@ -2537,6 +2582,7 @@ static bool pipeConsumePayload(uint8_t* data, uint16_t len) {
 }
 
 void handlePipeWriteStart(uint8_t* data, uint16_t len) {
+    sessionOrigin = commandOrigin();
     // A new START aborts any in-flight transfer of any family and resets pipe state
     // (mirrors legacy START). Reset happens up-front so even a malformed START is safe.
     if (partialCtx.active) cleanup_partial_write_state();
@@ -2710,6 +2756,7 @@ void handlePipeWriteStart(uint8_t* data, uint16_t len) {
 void handlePipeWriteData(uint8_t* data, uint16_t len) {
     if (!pipeState.active || pipeState.error) return;   // silent discard
     if (len < 1) return;
+    if (!frameOwnsSession("0x0081")) return;
     uint8_t  seq     = data[0];
     uint8_t* payload = data + 1;
     uint16_t plen    = (uint16_t)(len - 1);
@@ -2799,6 +2846,7 @@ void handlePipeWriteData(uint8_t* data, uint16_t len) {
 }
 
 void handlePipeWriteEnd(uint8_t* data, uint16_t len) {
+    if (pipeState.active && !frameOwnsSession("0x0082")) return;
     if (!pipeState.active) {
         uint8_t n[2] = {RESP_NACK, 0x82};   // no active pipe transfer
         sendResponse(n, sizeof(n));

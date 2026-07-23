@@ -4,6 +4,7 @@
 #include "encryption_state.h"
 #include "encryption.h"
 #include "power_latch.h"
+#include "wifi_service.h"  // OPENDISPLAY_HAS_WIFI + lanActivePort()/lanTlsEnabled()
 #include <Arduino.h>
 #include <string.h>
 
@@ -31,6 +32,20 @@ using namespace Adafruit_LittleFS_Namespace;
 #endif
 void writeSerial(String message, bool newLine = true);
 
+// Informational config logging (the parse-time dumps and printConfigSummary) is
+// suppressed on a deep-sleep wake: the config is unchanged since the boot that
+// already logged it, and the dump costs serial time in the wake window. Errors
+// and warnings are never suppressed -- they always go straight to writeSerial().
+// main.cpp arms this around the boot-time full_config_init() only, so a later
+// config write still logs what it parsed.
+static bool s_configLogQuiet = false;
+
+void setConfigLoggingQuiet(bool quiet) { s_configLogQuiet = quiet; }
+
+static void cfgInfo(String message) {
+    if (!s_configLogQuiet) writeSerial(message);
+}
+
 extern struct GlobalConfig globalConfig;
 extern uint8_t activeLedInstance;
 extern char wifiSsid[33];
@@ -40,7 +55,7 @@ extern bool wifiConfigured;
 #ifdef TARGET_ESP32
 extern char wifiServerUrl[65];
 extern uint16_t wifiServerPort;
-extern bool wifiServerConfigured;
+// extern bool wifiServerConfigured;  // dead -- see the 0x26 wifi_config parse
 extern bool wifiConnected;
 extern bool wifiInitialized;
 #endif
@@ -501,7 +516,7 @@ bool loadGlobalConfig(){
                         ip[2] = wc.server_host[2];
                         ip[3] = wc.server_host[3];
                         snprintf(wifiServerUrl, 65, "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
-                        writeSerial("Converted numeric IP to string: \"" + String(wifiServerUrl) + "\"");
+                        cfgInfo("Converted numeric IP to string: \"" + String(wifiServerUrl) + "\"");
                     } else if (!isStringFormat && wifiServerUrl[0] != '\0') {
                         uint32_t ipNum = (uint32_t)wc.server_host[0] |
                                         ((uint32_t)wc.server_host[1] << 8) |
@@ -513,7 +528,7 @@ bool loadGlobalConfig(){
                         ip[2] = (ipNum >> 8) & 0xFF;
                         ip[3] = ipNum & 0xFF;
                         snprintf(wifiServerUrl, 65, "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
-                        writeSerial("Converted 32-bit integer to IP string: \"" + String(wifiServerUrl) + "\"");
+                        cfgInfo("Converted 32-bit integer to IP string: \"" + String(wifiServerUrl) + "\"");
                     }
 
                     // server_port is the one BIG-ENDIAN field in WifiConfig; read it byte-wise
@@ -524,29 +539,43 @@ bool loadGlobalConfig(){
                         wifiServerPort = 2446;
                     }
 
-                    wifiServerConfigured = (wifiServerUrl[0] != '\0' &&
-                                           strcmp(wifiServerUrl, "0.0.0.0") != 0);
-                    if (wifiServerConfigured) {
-                        writeSerial("Server configured: YES");
-                        writeSerial("Server URL: \"" + String(wifiServerUrl) + "\"");
-                        writeSerial("Server Port: " + String(wifiServerPort));
-                    } else {
-                        writeSerial("Server configured: NO");
-                        if (wifiServerUrl[0] == '\0') {
-                            writeSerial("Reason: URL is empty");
-                        } else if (strcmp(wifiServerUrl, "0.0.0.0") == 0) {
-                            writeSerial("Reason: URL is \"0.0.0.0\"");
-                        }
-                    }
+                    // wifiServerConfigured is dead: it was only ever read by the log
+                    // lines below. It described the old "tag pushes to an upload
+                    // server" model, but the LAN transport inverted that -- the device
+                    // listens and the host connects to it, so server_host gates
+                    // nothing. Left commented rather than deleted because server_host
+                    // is still part of the 0x26 wire format.
+                    // wifiServerConfigured = (wifiServerUrl[0] != '\0' &&
+                    //                        strcmp(wifiServerUrl, "0.0.0.0") != 0);
+                    // if (wifiServerConfigured) {
+                    //     cfgInfo("Server configured: YES");
+                    //     cfgInfo("Server URL: \"" + String(wifiServerUrl) + "\"");
+                    //     cfgInfo("Server Port: " + String(wifiServerPort));
+                    // } else {
+                    //     cfgInfo("Server configured: NO");
+                    //     if (wifiServerUrl[0] == '\0') {
+                    //         cfgInfo("Reason: URL is empty");
+                    //     } else if (strcmp(wifiServerUrl, "0.0.0.0") == 0) {
+                    //         cfgInfo("Reason: URL is \"0.0.0.0\"");
+                    //     }
+                    // }
+                    // Report the endpoint the LAN listener will actually bind, not
+                    // just the raw config field: the TLS-PSK channel runs on
+                    // server_port + 1 and there is no config entry for it.
+#ifdef OPENDISPLAY_HAS_WIFI
+                    cfgInfo("LAN: " + String(lanTlsEnabled() ? "TLS-PSK" : "plaintext") +
+                            " on port " + String(lanActivePort()) +
+                            " (server_port " + String(wifiServerPort) + ")");
+#else
+                    cfgInfo("LAN: transport not compiled in (server_port " +
+                            String(wifiServerPort) + ")");
+#endif
 #endif
                     wifiConfigured = true;
-                    writeSerial("=== WiFi Configuration Loaded ===");
-                    writeSerial("SSID: \"" + String(wifiSsid) + "\"");
-                    if (passwordLen > 0) {
-                        writeSerial("Password: \"" + String(wifiPassword) + "\"");
-                    } else {
-                        writeSerial("Password: (empty)");
-                    }
+                    cfgInfo("=== WiFi Configuration Loaded ===");
+                    // Do NOT log the SSID or password (credentials). Log presence/length only.
+                    cfgInfo("SSID: (set, " + String(ssidLen) + " chars)");
+                    cfgInfo(passwordLen > 0 ? "Password: (set)" : "Password: (empty)");
                     String encTypeStr = "Unknown";
                     switch (wifiEncryptionType) {
                         case 0x00: encTypeStr = "None (Open)"; break;
@@ -555,10 +584,10 @@ bool loadGlobalConfig(){
                         case 0x03: encTypeStr = "WPA2"; break;
                         case 0x04: encTypeStr = "WPA3"; break;
                     }
-                    writeSerial("Encryption Type: 0x" + String(wifiEncryptionType, HEX) + " (" + encTypeStr + ")");
-                    writeSerial("SSID length: " + String(ssidLen) + " bytes");
-                    writeSerial("Password length: " + String(passwordLen) + " bytes");
-                    writeSerial("WiFi configured: true");
+                    cfgInfo("Encryption Type: 0x" + String(wifiEncryptionType, HEX) + " (" + encTypeStr + ")");
+                    cfgInfo("SSID length: " + String(ssidLen) + " bytes");
+                    cfgInfo("Password length: " + String(passwordLen) + " bytes");
+                    cfgInfo("WiFi configured: true");
                 }
                 break;
             case 0x27: // security_config
@@ -576,27 +605,27 @@ bool loadGlobalConfig(){
                         }
                         if (keyIsZero) {
                             securityConfig.encryption_enabled = 0;
-                            writeSerial("Security config: Encryption disabled (key is all zeros)");
+                            cfgInfo("Security config: Encryption disabled (key is all zeros)");
                         } else if (securityConfig.encryption_enabled) {
-                            writeSerial("Security config: Encryption enabled");
-                            writeSerial("Session timeout: " + String(securityConfig.session_timeout_seconds) + " seconds");
+                            cfgInfo("Security config: Encryption enabled");
+                            cfgInfo("Session timeout: " + String(securityConfig.session_timeout_seconds) + " seconds");
                         } else {
-                            writeSerial("Security config: Encryption disabled (flag set to 0)");
+                            cfgInfo("Security config: Encryption disabled (flag set to 0)");
                         }
                         // Log security flags
                         if (securityConfig.flags & OD_SECURITY_FLAG_REWRITE_ALLOWED) {
-                            writeSerial("Security config: Rewrite allowed (unauthorized config writes permitted)");
+                            cfgInfo("Security config: Rewrite allowed (unauthorized config writes permitted)");
                         }
                         if (securityConfig.flags & OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN) {
-                            writeSerial("Security config: Show key on screen enabled (future feature)");
+                            cfgInfo("Security config: Show key on screen enabled (future feature)");
                         }
                         if (securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_ENABLED) {
-                            writeSerial("Security config: Reset pin " + String(securityConfig.reset_pin) + 
+                            cfgInfo("Security config: Reset pin " + String(securityConfig.reset_pin) + 
                                        " enabled (polarity: " + String((securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_POLARITY) ? "HIGH" : "LOW") + 
                                        ", pullup: " + String((securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_PULLUP) ? "yes" : "no") + 
                                        ", pulldown: " + String((securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_PULLDOWN) ? "yes" : "no") + ")");
                         } else {
-                            writeSerial("Security config: Reset pin disabled");
+                            cfgInfo("Security config: Reset pin disabled");
                         }
                     } else {
                         writeSerial("ERROR: Not enough data for security_config");
@@ -626,6 +655,7 @@ bool loadGlobalConfig(){
 }
 
 void printConfigSummary(){
+    if (s_configLogQuiet) return;
     if (!globalConfig.loaded) {
         writeSerial("Config not loaded");
         return;
@@ -640,24 +670,7 @@ void printConfigSummary(){
     writeSerial("  BLE: " + String((globalConfig.system_config.communication_modes & COMM_MODE_BLE) ? "enabled" : "disabled"));
     writeSerial("  OEPL: " + String((globalConfig.system_config.communication_modes & COMM_MODE_OEPL) ? "enabled" : "disabled"));
     writeSerial("  WiFi: " + String((globalConfig.system_config.communication_modes & COMM_MODE_WIFI) ? "enabled" : "disabled"));
-    #ifdef TARGET_ESP32
-    if (globalConfig.system_config.communication_modes & COMM_MODE_WIFI) {
-        if (wifiConfigured) {
-            writeSerial("  WiFi SSID: \"" + String(wifiSsid) + "\"");
-            if (wifiInitialized) {
-                if (wifiConnected) {
-                    writeSerial("  WiFi Status: Connected (IP: " + WiFi.localIP().toString() + ")");
-                } else {
-                    writeSerial("  WiFi Status: Disconnected");
-                }
-            } else {
-                writeSerial("  WiFi Status: Not initialized");
-            }
-        } else {
-            writeSerial("  WiFi Status: Configured but not loaded");
-        }
-    }
-    #endif
+
     writeSerial("Device Flags: 0x" + String(globalConfig.system_config.device_flags, HEX));
     writeSerial("  PWR_PIN flag: " + String((globalConfig.system_config.device_flags & DEVICE_FLAG_PWR_PIN) ? "enabled" : "disabled"));
     #ifdef TARGET_NRF
@@ -816,16 +829,35 @@ void printConfigSummary(){
         writeSerial("  custom_string_3: "   + String((char*)globalConfig.data_extended.custom_string_3));
         writeSerial("");
     }
+    // WiFi configuration summary (ESP32 only)
+    #ifdef TARGET_ESP32
+    if (globalConfig.system_config.communication_modes & COMM_MODE_WIFI) {
+        if (wifiConfigured) {
+            writeSerial("  WiFi SSID: (configured)");  // credential; not logged verbatim
+            if (wifiInitialized) {
+                if (wifiConnected) {
+                    writeSerial("  WiFi Status: Connected (IP: " + WiFi.localIP().toString() + ")");
+                } else {
+                    writeSerial("  WiFi Status: Disconnected");
+                }
+            } else {
+                writeSerial("  WiFi Status: Not initialized");
+            }
+        } else {
+            writeSerial("  WiFi Status: Configured but not loaded");
+        }
+    }
+    #endif
     writeSerial("=============================");
 }
 
 void full_config_init() {
-    writeSerial("Initializing config storage...");
+    cfgInfo("Initializing config storage...");
     if (!initConfigStorage()) {
         writeSerial("Config storage initialization failed");
         return;
     }
-    writeSerial("Config storage initialized successfully");
+    cfgInfo("Config storage initialized successfully");
 
 #ifdef FACTORY_CLEAR_CONFIG_ON_BOOT
     writeSerial("Factory clear build: erasing stored config");
@@ -834,13 +866,13 @@ void full_config_init() {
     return;
 #endif
 
-    writeSerial("Loading global configuration...");
+    cfgInfo("Loading global configuration...");
     bool configLoaded = loadGlobalConfig();
     if (!configLoaded && tryProvisionFactoryEmbed()) {
         configLoaded = loadGlobalConfig();
     }
     if (configLoaded) {
-        writeSerial("Global configuration loaded successfully");
+        cfgInfo("Global configuration loaded successfully");
         printConfigSummary();
         clearEncryptionSession();
         encryptionInitialized = true;

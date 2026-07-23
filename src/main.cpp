@@ -93,7 +93,12 @@ void setup() {
     #endif
     writeSerial("Starting setup...");
     if (is_deep_sleep_wake) { writeSerial("[wake] >> full_config_init"); flushLog(); }
+    // A wake re-parses the same stored config the previous boot already dumped, so
+    // skip the informational dump here (errors/warnings still print). Cleared right
+    // after, so a later BLE config write still logs what it parsed.
+    setConfigLoggingQuiet(is_deep_sleep_wake);
     full_config_init();
+    setConfigLoggingQuiet(false);
     if (is_deep_sleep_wake) { writeSerial("[wake] << full_config_init >> initio"); flushLog(); }
     initio();
 #ifdef TARGET_NRF
@@ -119,7 +124,7 @@ void setup() {
 #elif defined(TARGET_NRF)
     ble_nrf_advertising_start();
 #endif
-    #ifdef TARGET_ESP32
+    #ifdef OPENDISPLAY_HAS_WIFI
     if (!is_deep_sleep_wake) {
         initWiFi(false);  // wake: WiFi stays deferred to fullSetupAfterConnection()
     }
@@ -201,7 +206,11 @@ static void pollActivity() {
     // Covers connect and disconnect. The disconnect edge is what re-arms the
     // window so a dropped client gets a full reconnect opportunity.
     const uint8_t connCount = (pServer != nullptr) ? (uint8_t)pServer->getConnectedCount() : 0;
+#ifdef OPENDISPLAY_HAS_WIFI
     const bool lanSession = wifiInitialized && wifiServerConnected && wifiClient.connected();
+#else
+    const bool lanSession = false;
+#endif
 
     if (!activityPrimed) {
         activityPrimed = true;
@@ -282,6 +291,21 @@ void flushResponseQueueToBle() {
 static void serviceBleDisconnectCleanup() {
     if (!bleDisconnectCleanupPending || epdRefreshInProgress) return;
     bleDisconnectCleanupPending = false;
+    // BLE and LAN both raise this flag, so tear down only when the transport that
+    // OWNS the in-flight transfer is the one that went away. Otherwise a BLE
+    // disconnect kills a live LAN push (and a LAN disconnect kills a BLE push)
+    // purely because the other link dropped. Owner is recorded at START.
+#ifdef OPENDISPLAY_HAS_WIFI
+    const bool lanOwnsSession = (transferSessionOrigin() != 0);   // != ORIGIN_BLE
+    const bool ownerStillUp = lanOwnsSession
+                                  ? wifiLanClientConnected()
+                                  : (pServer != nullptr && pServer->getConnectedCount() > 0);
+    if (ownerStillUp) {
+        writeSerial(String("Disconnect cleanup skipped: transfer still owned by a live ") +
+                    (lanOwnsSession ? "LAN" : "BLE") + " session");
+        return;
+    }
+#endif
     // ACTIVE-only-teardown invariant: a WARM (post-successful-refresh) panel
     // SURVIVES disconnect and keeps its keep-alive window, so the cleanups below
     // no-op on power when WARM and only tear down a mid-transfer (PWR_ACTIVE)
@@ -386,6 +410,7 @@ void loop() {
         }
     }
     checkPartialWriteTimeout();
+    #ifdef OPENDISPLAY_HAS_WIFI
     // WiFi handling runs after BLE queue processing to avoid blocking
     // BLE command responses (moved from top of loop in v1.6 fix).
     handleWiFiServer();
@@ -404,7 +429,8 @@ void loop() {
             restartWiFiLanAfterReconnect();
         }
     }
-    #ifdef TARGET_ESP32
+    #endif
+    #ifdef OPENDISPLAY_HAS_WIFI
     const bool wifiLanSession = wifiInitialized && wifiServerConnected && wifiClient.connected();
     #else
     const bool wifiLanSession = false;
@@ -495,7 +521,9 @@ void idleDelay(uint32_t delayMs) {
 #ifdef TARGET_ESP32
 void fullSetupAfterConnection() {
     writeSerial("=== Full Setup After Connection ===");
+#ifdef OPENDISPLAY_HAS_WIFI
     initWiFi(false);
+#endif
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_SEEED_GFX)
     if (globalConfig.display_count > 0 && seeed_driver_used()) {
         writeSerial("Panel: Seeed ED103 (bb_epaper not used)", true);
