@@ -24,6 +24,17 @@ void writeSerial(String message, bool newLine = true);
 bool isAuthenticated();
 extern struct GlobalConfig globalConfig;
 
+// F4 -- command origin marker. The shared dispatcher (imageDataWritten) and the
+// response senders read this to (a) BYPASS the app-layer AES-CCM envelope for
+// TLS-secured LAN frames (SECTION 9 rule 4: origin-gated decrypt) and (b) route
+// each response back over ONLY its origin transport (no BLE/LAN dual-delivery).
+// Everything runs on the single loop() task (BLE queue drain + handleWiFiServer),
+// so this plain global needs no locking: it is set immediately before each
+// imageDataWritten() call and restored to ORIGIN_BLE after. On non-LAN builds it
+// stays ORIGIN_BLE for the whole lifetime (LAN never sets it).
+enum CommandOrigin { ORIGIN_BLE = 0, ORIGIN_LAN_PLAIN = 1, ORIGIN_LAN_TLS = 2 };
+volatile uint8_t g_commandOrigin = ORIGIN_BLE;
+
 static void reloadConfigAfterSave(void) {
     if (!loadGlobalConfig()) {
         writeSerial("WARNING: Config was saved but reload from storage failed (see errors above). "
@@ -37,7 +48,7 @@ static void reloadConfigAfterSave(void) {
         epdSessionForceOff();
     }
     clearEncryptionSession();
-#ifdef TARGET_ESP32
+#ifdef OPENDISPLAY_HAS_WIFI
     initWiFi();
 #endif
 }
@@ -67,8 +78,6 @@ struct ResponseQueueItem {
     uint16_t len;
     bool pending;
 };
-extern WiFiClient wifiClient;
-extern bool wifiServerConnected;
 extern ResponseQueueItem responseQueue[10];
 extern uint8_t responseQueueHead;
 extern uint8_t responseQueueTail;
@@ -78,17 +87,7 @@ extern void flushResponseQueueToBle();
 static constexpr uint8_t RESPONSE_QUEUE_SIZE_LOCAL = 10;
 static constexpr uint16_t MAX_RESPONSE_SIZE_LOCAL = 512;
 
-static void send_wifi_lan_frame(const uint8_t* payload, uint16_t len) {
-    if (!wifiServerConnected || !wifiClient.connected() || len == 0) {
-        return;
-    }
-    uint8_t hdr[2] = { (uint8_t)(len & 0xFF), (uint8_t)((len >> 8) & 0xFF) };
-    if (wifiClient.write(hdr, 2) != 2 || wifiClient.write(payload, len) != len) {
-        writeSerial("ERROR: LAN response write incomplete", true);
-    }
-}
-
-/** Mirror responses to BLE only when a central is connected; LAN already got send_wifi_lan_frame. */
+/** Mirror responses to BLE only when a central is connected; LAN responses go via opendisplay_lan_send_frame. */
 static void esp32_queue_ble_notify_copy(const uint8_t* response, uint16_t len, bool quiet = false) {
     if (len > MAX_RESPONSE_SIZE_LOCAL) {
         writeSerial("ERROR: Response too large for queue (" + String(len) + " > " + String(MAX_RESPONSE_SIZE_LOCAL) + ")", true);
@@ -141,8 +140,14 @@ void sendResponseUnencrypted(uint8_t* response, uint16_t len) {
     if (len > 32) hexDump += " ...";
     writeSerial(hexDump, true);
 #ifdef TARGET_ESP32
-    send_wifi_lan_frame(response, len);
-    esp32_queue_ble_notify_copy(response, len);
+    // F4 de-fan-out: reply over the origin transport only.
+    if (g_commandOrigin == ORIGIN_BLE) {
+        esp32_queue_ble_notify_copy(response, len);
+    } else {
+#ifdef OPENDISPLAY_HAS_WIFI
+        opendisplay_lan_send_frame(response, len);
+#endif
+    }
 #endif
 #ifdef TARGET_NRF
     if (Bluefruit.connected() && imageCharacteristic.notifyEnabled()) {
@@ -175,7 +180,9 @@ void sendResponse(uint8_t* response, uint16_t len) {
     // Length test uses the plaintext ACK (encryption happens after this check).
     const bool quietAck = (len == 2 && response[0] == 0x00 && response[1] == 0x71 && imageWriteLogQuietAck())
                        || (len == 7 && response[0] == 0x00 && response[1] == 0x81 && imageWriteLogQuietAck());
-    if (isAuthenticated() && len >= 2) {
+    // TLS-origin responses are already secured by the TLS record layer; never wrap
+    // them in the app-layer CCM envelope (no double-encrypt; SECTION 9 rule 4).
+    if (isAuthenticated() && len >= 2 && g_commandOrigin != ORIGIN_LAN_TLS) {
         uint16_t command = (response[0] << 8) | response[1];
         // The 7-byte PIPE data ACK {0x00,0x81,highest_seen,mask:4} carries a rolling
         // seq at byte[2]; a highest_seen of 0xFE/0xFF (any image >= 255 chunks) must
@@ -228,8 +235,14 @@ void sendResponse(uint8_t* response, uint16_t len) {
         writeSerial(line, true);
     }
 #ifdef TARGET_ESP32
-    send_wifi_lan_frame(response, len);
-    esp32_queue_ble_notify_copy(response, len, quietAck);
+    // F4 de-fan-out: reply over the origin transport only.
+    if (g_commandOrigin == ORIGIN_BLE) {
+        esp32_queue_ble_notify_copy(response, len, quietAck);
+    } else {
+#ifdef OPENDISPLAY_HAS_WIFI
+        opendisplay_lan_send_frame(response, len);
+#endif
+    }
 #endif
 #ifdef TARGET_NRF
     if (Bluefruit.connected() && imageCharacteristic.notifyEnabled()) {
@@ -574,7 +587,11 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
         return;
     }
 
-    if (isEncryptionEnabled()) {
+    // SECTION 9 rule 4 (origin-gated decrypt): a frame arriving on the TLS-PSK LAN
+    // channel is already confidential + authenticated by TLS, so the app-layer
+    // AES-CCM envelope MUST NOT be required/applied — dispatch its plaintext
+    // command directly. BLE and plaintext-LAN frames still honor the CCM gate.
+    if (isEncryptionEnabled() && g_commandOrigin != ORIGIN_LAN_TLS) {
         if (!isAuthenticated()) {
             writeSerial("ERROR: Command requires authentication (encryption enabled)");
             uint8_t response[] = {RESP_ACK, (uint8_t)(command & 0xFF), RESP_AUTH_REQUIRED};
