@@ -34,6 +34,16 @@ bool wifiLanClientConnected(void);
 uint16_t lanActivePort(void);
 /// True when the LAN channel is TLS-PSK rather than plaintext (= isEncryptionEnabled()).
 bool lanTlsEnabled(void);
+/// Drop to WIFI_PS_NONE for the duration of a LAN-origin streaming transfer.
+/// Modem sleep only guarantees the radio listens at each DTIM beacon, so the
+/// per-chunk ack ladder of a direct/partial write can stall up to DTIM x 102.4 ms
+/// on every inbound frame. Idempotent; no-op when WiFi is down or already suspended.
+void lanPowerSaveSuspend(void);
+/// Restore WIFI_PS_MIN_MODEM. Idempotent; no-op when not suspended. Called from the
+/// transfer teardown funnels, so it must tolerate being invoked when no transfer ran.
+void lanPowerSaveRestore(void);
+/// True while power save is suspended for a transfer (for the loop() safety net).
+bool lanPowerSaveSuspended(void);
 
 #endif
 

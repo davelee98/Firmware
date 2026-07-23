@@ -32,7 +32,8 @@ extern struct GlobalConfig globalConfig;
 // so this plain global needs no locking: it is set immediately before each
 // imageDataWritten() call and restored to ORIGIN_BLE after. On non-LAN builds it
 // stays ORIGIN_BLE for the whole lifetime (LAN never sets it).
-enum CommandOrigin { ORIGIN_BLE = 0, ORIGIN_LAN_PLAIN = 1, ORIGIN_LAN_TLS = 2 };
+// enum CommandOrigin lives in communication.h so display_service.cpp / main.cpp can
+// name the values instead of comparing against a bare 0.
 volatile uint8_t g_commandOrigin = ORIGIN_BLE;
 
 // Transport tag for the RX banner and TX dump. Three transports share this

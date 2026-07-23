@@ -541,6 +541,13 @@ static void directWriteComputeGeometry(bool compressed);
 static void directWriteActivatePanel(void);
 static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t endOpcode);
 
+#ifdef TARGET_ESP32
+// Defined in main.cpp. The response ring's only drainer is the loop task, which is
+// the same task running these handlers — so anything queued here stays queued until
+// we return. Call it before any multi-second blocking work (see the refresh tail).
+extern void flushResponseQueueToBle();
+#endif
+
 // PIPE_WRITE (0x0080-0x0082) sliding-window receive state + reorder queue. Declared
 // early so the quiet-logging predicates below can consult pipeState.active. The
 // reorder array is a file static (not in the struct) so both targets pay it once.
@@ -1970,6 +1977,11 @@ static void directWriteSinkBytes(uint8_t* data, uint32_t len) {
 static bool directWriteTouchSuspended = false;
 
 void cleanupDirectWriteState(bool refreshDisplay) {
+#ifdef OPENDISPLAY_HAS_WIFI
+    // Sole clearer of directWriteActive, so this is the one place that reliably
+    // re-arms modem sleep after a full-frame transfer. No-op when nothing suspended it.
+    lanPowerSaveRestore();
+#endif
     directWriteActive = false;
     directWriteCompressed = false;
     directWriteBitplanes = false;
@@ -2114,6 +2126,15 @@ void handleDirectWriteStart(uint8_t* data, uint16_t len) {
             return;
         }
     }
+#ifdef OPENDISPLAY_HAS_WIFI
+    // Modem sleep only wakes the radio at each DTIM beacon, so the per-chunk 0x71 ack
+    // ladder that follows can stall up to DTIM x 102.4 ms on every inbound frame.
+    // Position is load-bearing: the prior-session cleanups at the head of this function
+    // each call lanPowerSaveRestore(), so a suspend above them is undone. Below them
+    // every exit funnels through cleanupDirectWriteState(), which re-arms modem sleep --
+    // including the zlib-failure return just after this call.
+    if (sessionOrigin != ORIGIN_BLE) lanPowerSaveSuspend();
+#endif
     directWriteActivatePanel();
     if (compressed && len > 4) {
         uint32_t compressedDataLen = len - 4;
@@ -2199,6 +2220,14 @@ void handlePartialWriteStart(uint8_t* data, uint16_t len) {
 
     memset(&partialCtx, 0, sizeof(partialCtx));
     partialCtx.active = true;
+#ifdef OPENDISPLAY_HAS_WIFI
+    // Same per-chunk 0x71 ack ladder as a full-frame write. Must go AFTER active=true,
+    // not earlier in this function: every validation return above passes
+    // cleanupState=false to send_direct_write_nack, so none reaches a restore and a
+    // malformed header would strand the radio at full power. From here on,
+    // cleanup_partial_write_state() covers every exit.
+    if (sessionOrigin != ORIGIN_BLE) lanPowerSaveSuspend();
+#endif
     partialCtx.compressed = (flags & PARTIAL_FLAG_COMPRESSED) != 0;
     partialCtx.flags = flags;
     partialCtx.new_etag = newEtag;
@@ -2372,6 +2401,14 @@ static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t end
     writeSerial(")", true);
     uint8_t ackResponse[] = {0x00, endOpcode};
     sendResponse(ackResponse, sizeof(ackResponse));
+#ifdef TARGET_ESP32
+    // Push the END ack — and the final tail ACK the auto-complete path queued just
+    // before calling us — onto the air BEFORE the blocking refresh below. bbepRefresh
+    // + waitforrefresh occupy the loop task for seconds on a big panel, and the loop
+    // task is the response ring's only drainer, so without this the client sits in its
+    // tail-flush probe loop and aborts the (already complete) transfer on PTO.
+    flushResponseQueueToBle();
+#endif
     delay(20);
     epdRefreshInProgress = true;
     bool refreshSuccess = false;
@@ -2449,6 +2486,8 @@ void resetPipeWriteState(void) {
 }
 
 bool pipeWriteActive(void) { return pipeState.active; }
+
+bool partialWriteActive(void) { return partialCtx.active; }
 
 // A chunk c is "received" for ACK purposes if it was accepted in-order (lies just
 // below expected_seq within the mask window) or is currently held in the reorder
@@ -2927,6 +2966,11 @@ void handlePipeWriteEnd(uint8_t* data, uint16_t len) {
 }
 
 static void cleanup_partial_write_state(void) {
+#ifdef OPENDISPLAY_HAS_WIFI
+    // Sole clearer of partialCtx.active, so this is the one place that reliably
+    // re-arms modem sleep for a partial transfer. No-op when nothing suspended it.
+    lanPowerSaveRestore();
+#endif
     // Tear the panel down only when a transfer/refresh is actually in flight
     // (PWR_ACTIVE) — i.e. on error / NACK / disconnect-mid-stream / watchdog. After
     // a successful refresh, epdSessionRelease already moved to PWR_WARM, so

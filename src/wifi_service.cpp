@@ -38,9 +38,9 @@ extern uint32_t tcpReceiveBufferPos;
 extern uint8_t msd_payload[16];
 
 // Command origin marker (F4): the shared dispatcher (imageDataWritten) reads this
-// to decide whether to run the app-layer AES-CCM gate. Defined in communication.cpp.
+// to decide whether to run the app-layer AES-CCM gate. Defined in communication.cpp;
+// enum CommandOrigin comes from communication.h.
 // ORIGIN_LAN_TLS frames are already secured by TLS, so CCM MUST be bypassed.
-enum CommandOrigin { ORIGIN_BLE = 0, ORIGIN_LAN_PLAIN = 1, ORIGIN_LAN_TLS = 2 };
 extern volatile uint8_t g_commandOrigin;
 
 void writeSerial(String message, bool newLine = true);
@@ -71,6 +71,31 @@ static mbedtls_ctr_drbg_context tlsDrbg;
 static mbedtls_entropy_context  tlsEntropy;
 
 static uint32_t lastLanActivityMs = 0;  // for the OD_LAN_READ_TIMEOUT_S idle drop
+
+// --------------------------------------------------- transfer power save ---
+// Sticky across the whole transfer, unlike g_commandOrigin (per-frame, restored to
+// ORIGIN_BLE right after each dispatch). A transfer can be torn down from a loop()
+// timeout, disconnect cleanup, or an error path -- none of which know the origin --
+// so suspend is origin-gated at START and restore is unconditional everywhere else.
+static bool lanPsSuspended = false;
+
+void lanPowerSaveSuspend(void) {
+    if (lanPsSuspended || !wifiConnected) return;
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    lanPsSuspended = true;
+    writeSerial("LAN: power save OFF (WIFI_PS_NONE) for transfer");
+}
+
+void lanPowerSaveRestore(void) {
+    if (!lanPsSuspended) return;
+    lanPsSuspended = false;
+    // Only touch the radio if it is still associated: after a disconnect the
+    // reconnect path re-applies MIN_MODEM itself (and would fail here anyway).
+    if (wifiConnected) esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    writeSerial("LAN: power save restored (WIFI_PS_MIN_MODEM)");
+}
+
+bool lanPowerSaveSuspended(void) { return lanPsSuspended; }
 
 static uint16_t lanBasePort(void) {
     return (wifiServerPort != 0) ? wifiServerPort : (uint16_t)OD_LAN_TCP_PORT;
@@ -411,6 +436,11 @@ void disconnectWiFiServer() {
     }
     wifiServerConnected = false;
     tcpReceiveBufferPos = 0;
+    // The client is gone, so any transfer it owned is dead. Restore here rather than
+    // relying on the deferred cleanup below: serviceBleDisconnectCleanup() skips
+    // teardown while an EPD refresh is in flight or when the other transport still
+    // owns the session, either of which would leave the radio stuck at full power.
+    lanPowerSaveRestore();
     // F4: abort any in-flight direct-write / pipe / partial transfer + tear down a
     // mid-transfer panel session, DEFERRED to loop() (serviceBleDisconnectCleanup)
     // so cleanup never races an in-progress EPD refresh. Reuses the BLE path's flag.
@@ -445,6 +475,10 @@ void handleWiFiServer() {
         wifiConnected = true;
         writeSerial("=== WiFi connected ===");
         writeSerial("IP: " + WiFi.localIP().toString());
+        // Re-association: any transfer that suspended power save died with the old
+        // link, so clear the flag here rather than leaving it stuck across the
+        // reconnect (the teardown funnels may not run if the client vanished).
+        lanPowerSaveRestore();
         esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
         startLanServer();
     }
