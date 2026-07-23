@@ -85,20 +85,22 @@ public:
         // length 0. .length()/.c_str() on NimBLEAttValue preserve the binary payload.
         NimBLEAttValue value = pCharacteristic->getValue();
         const bool quiet = imageWriteLogQuietFrame((const uint8_t*)value.c_str(), value.length());
-        if (!quiet) {
-            writeSerial("=== BLE WRITE RECEIVED (ESP32) ===");
-            writeSerial("Received data length: " + String(value.length()) + " bytes");
-        }
         if (value.length() > 0 && value.length() <= MAX_COMMAND_SIZE) {
             uint8_t* data = (uint8_t*)value.c_str();
             uint16_t len = value.length();
             if (!quiet) {
-                String hexDump = "Data: ";
-                for (int i = 0; i < len && i < 16; i++) {
-                    if (data[i] < 16) hexDump += "0";
-                    hexDump += String(data[i], HEX) + " ";
+                // One-line RX log, mirroring the "BLE: TX ..." response log.
+                uint16_t cmd = (len >= 2) ? ((data[0] << 8) | data[1]) : data[0];
+                char head[32];
+                snprintf(head, sizeof(head), "BLE: RX 0x%04X (%u B):", cmd, (unsigned)len);
+                String line = head;
+                for (int i = 0; i < len && i < 32; i++) {
+                    char b[4];
+                    snprintf(b, sizeof(b), " %02X", data[i]);
+                    line += b;
                 }
-                writeSerial(hexDump);
+                if (len > 32) line += " ...";
+                writeSerial(line);
             }
             // SPSC ring: publish head with RELEASE after the payload is fully written
             // so the consumer (main loop) never observes a slot before its bytes land.
@@ -110,7 +112,6 @@ public:
                 commandQueue[head].len = len;
                 commandQueue[head].pending = true;
                 __atomic_store_n(&commandQueueHead, nextHead, __ATOMIC_RELEASE);
-                if (!quiet) writeSerial("ESP32: Command queued for processing");
             } else {
                 writeSerial("ERROR: Command queue full, dropping command");
             }
