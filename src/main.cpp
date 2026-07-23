@@ -234,7 +234,10 @@ static void pollActivity() {
 // negotiated ack_every (N_eff 1-2) a 33-command drain can emit up to ~32 pipe
 // ACKs, which would overflow the 10-slot response ring (drops the NEWEST entry)
 // and leave only stale ACKs — lagging window refunds and collapsing throughput.
-static void flushResponseQueueToBle() {
+// Non-static: handleReadConfig() (communication.cpp) calls this between config
+// chunks so a single multi-chunk read never overflows the 10-slot response ring,
+// mirroring how the loop() command drain flushes between commands.
+void flushResponseQueueToBle() {
     if (responseQueueTail == responseQueueHead) return;
     if (esp32_ble_notify_enabled()) {
         uint8_t bleDrain = 0;
