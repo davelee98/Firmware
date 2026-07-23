@@ -157,16 +157,41 @@ static bool tlsBeginSession(void) {
     return true;
 }
 
+// Staging buffer so a frame leaves as ONE write. Two writes cost an extra packet
+// (and, before setNoDelay(), a 40-200 ms Nagle/delayed-ACK stall on every frame);
+// on TLS they also cost a second record header + MAC, which on a 2-byte ACK is more
+// overhead than payload. Sized past the largest response the device produces
+// (encrypted_response[600] in communication.cpp); anything larger falls back to the
+// two-write path rather than growing static RAM for a case that does not occur.
+static uint8_t lanTxFrame[2 + 640];
+
 // Write one [len:2 LE][payload] frame over the active LAN channel (TLS or plain).
 // Called by communication.cpp for LAN-origin responses (send_tls_lan_frame / plain).
 void opendisplay_lan_send_frame(const uint8_t* payload, uint16_t len) {
     if (!wifiServerConnected || !wifiClient.connected() || len == 0) {
         return;
     }
+    if (tlsMode && (!tlsSessionActive || !tlsHandshakeDone)) return;
+
+    if ((uint32_t)len + 2u <= sizeof(lanTxFrame)) {
+        lanTxFrame[0] = (uint8_t)(len & 0xFF);
+        lanTxFrame[1] = (uint8_t)((len >> 8) & 0xFF);
+        memcpy(lanTxFrame + 2, payload, len);
+        const uint16_t total = (uint16_t)(len + 2u);
+        if (tlsMode) {
+            if (mbedtls_ssl_write(&tlsSsl, lanTxFrame, total) < 0) {
+                writeSerial("ERROR: TLS LAN response write failed", true);
+            }
+        } else if (wifiClient.write(lanTxFrame, total) != total) {
+            writeSerial("ERROR: LAN response write incomplete", true);
+        }
+        return;
+    }
+
+    // Oversized fallback: header then payload. A failure between the two leaves the
+    // peer waiting on a length prefix whose payload never arrives.
     uint8_t hdr[2] = { (uint8_t)(len & 0xFF), (uint8_t)((len >> 8) & 0xFF) };
     if (tlsMode) {
-        if (!tlsSessionActive || !tlsHandshakeDone) return;
-        // TLS record layer coalesces; write header then payload.
         if (mbedtls_ssl_write(&tlsSsl, hdr, 2) < 0 ||
             mbedtls_ssl_write(&tlsSsl, payload, len) < 0) {
             writeSerial("ERROR: TLS LAN response write failed", true);
@@ -440,6 +465,11 @@ void handleWiFiServer() {
             wifiClient.stop();
         }
         wifiClient = incoming;
+        // TCP_NODELAY: every LAN write is a complete, self-delimited frame, so there
+        // is never a following write for Nagle to coalesce it with -- it can only
+        // hold a small frame until the peer's delayed ACK fires (40-200 ms). With
+        // per-chunk direct-write ACKs that lands on every frame of a transfer.
+        wifiClient.setNoDelay(true);
         wifiClient.setTimeout(30000);
         tcpReceiveBufferPos = 0;
         wifiServerConnected = true;
