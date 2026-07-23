@@ -962,7 +962,7 @@
 #define OD_LAN_TCP_PORT                2446u   /* DEFAULT plaintext port; live port = WifiConfig.server_port (this default if 0) */
 #define OD_LAN_TLS_PORT                2447u   /* DEFAULT TLS-PSK port; DERIVED live = server_port + 1 (== OD_LAN_TCP_PORT + 1) */
 #define OD_LAN_MAX_FRAME               4096u   /* max WIRE frame: [len:2 LE] prefix + payload, inclusive */
-#define OD_LAN_MAX_PAYLOAD             (OD_LAN_MAX_FRAME - 2u)   /* max payload bytes (4094) after the prefix */
+#define OD_LAN_MAX_PAYLOAD             4094u   /* max payload bytes after the prefix; == OD_LAN_MAX_FRAME - 2 */
 #define OD_LAN_MDNS_SERVICE            "_opendisplay._tcp"  /* DNS-SD service; FQDN "_opendisplay._tcp.local." */
 #define OD_LAN_READ_TIMEOUT_S          30u     /* idle timeout: drop a client after this many seconds of no traffic */
 
