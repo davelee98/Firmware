@@ -41,6 +41,8 @@ volatile uint8_t g_commandOrigin = ORIGIN_BLE;
 // the TLS CCM-bypass path. Accurate at every call site below because the LAN
 // listener sets g_commandOrigin immediately around its dispatch. Always "BLE" on
 // nRF and on ESP32 builds without the LAN transport.
+uint8_t commandOrigin(void) { return g_commandOrigin; }
+
 static const char* originTag(void) {
     switch (g_commandOrigin) {
         case ORIGIN_LAN_TLS:   return "LAN-TLS";

@@ -291,6 +291,21 @@ void flushResponseQueueToBle() {
 static void serviceBleDisconnectCleanup() {
     if (!bleDisconnectCleanupPending || epdRefreshInProgress) return;
     bleDisconnectCleanupPending = false;
+    // BLE and LAN both raise this flag, so tear down only when the transport that
+    // OWNS the in-flight transfer is the one that went away. Otherwise a BLE
+    // disconnect kills a live LAN push (and a LAN disconnect kills a BLE push)
+    // purely because the other link dropped. Owner is recorded at START.
+#ifdef OPENDISPLAY_HAS_WIFI
+    const bool lanOwnsSession = (transferSessionOrigin() != 0);   // != ORIGIN_BLE
+    const bool ownerStillUp = lanOwnsSession
+                                  ? wifiLanClientConnected()
+                                  : (pServer != nullptr && pServer->getConnectedCount() > 0);
+    if (ownerStillUp) {
+        writeSerial(String("Disconnect cleanup skipped: transfer still owned by a live ") +
+                    (lanOwnsSession ? "LAN" : "BLE") + " session");
+        return;
+    }
+#endif
     // ACTIVE-only-teardown invariant: a WARM (post-successful-refresh) panel
     // SURVIVES disconnect and keeps its keep-alive window, so the cleanups below
     // no-op on power when WARM and only tear down a mid-transfer (PWR_ACTIVE)
