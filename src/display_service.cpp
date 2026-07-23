@@ -1785,7 +1785,9 @@ void updatemsdata(){
             pAdvertising->start();
         }
     }
+#ifdef OPENDISPLAY_HAS_WIFI
     opendisplay_mdns_update_msd_txt();
+#endif
 #endif
     mloopcounter++;
     mloopcounter &= 0x0F;
