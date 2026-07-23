@@ -33,7 +33,7 @@ extern uint16_t wifiServerPort;
 extern WiFiServer wifiServer;
 extern WiFiClient wifiClient;
 extern bool wifiServerConnected;
-extern uint8_t tcpReceiveBuffer[8192];
+extern uint8_t tcpReceiveBuffer[16384];
 extern uint32_t tcpReceiveBufferPos;
 extern uint8_t msd_payload[16];
 
@@ -542,47 +542,64 @@ void handleWiFiServer() {
         }
     }
 
-    int got = lanReadIntoBuffer();
-    if (got < 0) {
-        writeSerial("LAN: channel read error, dropping");
-        disconnectWiFiServer();
-        return;
-    }
-    if (got > 0) {
-        lastLanActivityMs = millis();
-    } else {
-        // No traffic: drop only after OD_LAN_READ_TIMEOUT_S of silence (persistent
-        // client is otherwise kept). Any valid frame below resets the timer.
-        if ((millis() - lastLanActivityMs) > (uint32_t)OD_LAN_READ_TIMEOUT_S * 1000UL) {
-            writeSerial("LAN: idle timeout, dropping client");
-            disconnectWiFiServer();
-        }
-        return;
-    }
-
-    while (tcpReceiveBufferPos >= 2) {
-        uint16_t flen = (uint16_t)(tcpReceiveBuffer[0] | (tcpReceiveBuffer[1] << 8));
-        if (flen == 0 || flen > OD_LAN_MAX_PAYLOAD) {
-            writeSerial("LAN: invalid frame length, closing");
+    // Bounded drain: keep reading and dispatching until the channel is dry or a
+    // per-tick byte budget (one full tcpReceiveBuffer) is spent. Parsing INSIDE
+    // the loop frees buffer space before the next read -- essential on TLS, where
+    // one mbedtls_ssl_read can return a whole max-size record. The budget bounds
+    // LAN's hold on loop() so BLE drain, buttons/touch/buzzer, and the deep-sleep
+    // gate still run under a saturating streaming client.
+    uint32_t drainedBytes = 0;
+    int got;
+    do {
+        got = lanReadIntoBuffer();
+        if (got < 0) {
+            writeSerial("LAN: channel read error, dropping");
             disconnectWiFiServer();
             return;
         }
-        if (tcpReceiveBufferPos < (uint32_t)(2 + flen)) {
-            break;
+        if (got > 0) {
+            lastLanActivityMs = millis();
+            drainedBytes += (uint32_t)got;
+        } else if (drainedBytes == 0) {
+            // No traffic at all this tick: drop only after OD_LAN_READ_TIMEOUT_S
+            // of silence (persistent client is otherwise kept). Any valid frame
+            // below resets the timer.
+            if ((millis() - lastLanActivityMs) > (uint32_t)OD_LAN_READ_TIMEOUT_S * 1000UL) {
+                writeSerial("LAN: idle timeout, dropping client");
+                disconnectWiFiServer();
+            }
+            return;
         }
-        // F4: tag the frame's origin so the dispatcher bypasses app-layer CCM on
-        // TLS (already-secure) and routes the response back over LAN only.
-        g_commandOrigin = tlsMode ? ORIGIN_LAN_TLS : ORIGIN_LAN_PLAIN;
-        lastLanActivityMs = millis();
-        imageDataWritten(NULL, NULL, tcpReceiveBuffer + 2, flen);
-        g_commandOrigin = ORIGIN_BLE;   // restore default for any subsequent BLE drain
-        uint32_t consumed = 2u + (uint32_t)flen;
-        uint32_t rem = tcpReceiveBufferPos - consumed;
-        if (rem > 0) {
-            memmove(tcpReceiveBuffer, tcpReceiveBuffer + consumed, rem);
+
+        while (tcpReceiveBufferPos >= 2) {
+            uint16_t flen = (uint16_t)(tcpReceiveBuffer[0] | (tcpReceiveBuffer[1] << 8));
+            if (flen == 0 || flen > OD_LAN_MAX_PAYLOAD) {
+                writeSerial("LAN: invalid frame length, closing");
+                disconnectWiFiServer();
+                return;
+            }
+            if (tcpReceiveBufferPos < (uint32_t)(2 + flen)) {
+                break;
+            }
+            // F4: tag the frame's origin so the dispatcher bypasses app-layer CCM on
+            // TLS (already-secure) and routes the response back over LAN only.
+            g_commandOrigin = tlsMode ? ORIGIN_LAN_TLS : ORIGIN_LAN_PLAIN;
+            lastLanActivityMs = millis();
+            imageDataWritten(NULL, NULL, tcpReceiveBuffer + 2, flen);
+            g_commandOrigin = ORIGIN_BLE;   // restore default for any subsequent BLE drain
+            uint32_t consumed = 2u + (uint32_t)flen;
+            uint32_t rem = tcpReceiveBufferPos - consumed;
+            if (rem > 0) {
+                memmove(tcpReceiveBuffer, tcpReceiveBuffer + consumed, rem);
+            }
+            tcpReceiveBufferPos = rem;
         }
-        tcpReceiveBufferPos = rem;
-    }
+        // A dispatched command may have torn the session down (reboot, power-off,
+        // config-driven LAN restart). Never read from a dead client.
+        if (!wifiServerConnected || !wifiClient.connected()) {
+            return;
+        }
+    } while (got > 0 && drainedBytes < sizeof(tcpReceiveBuffer));
 }
 
 void restartWiFiLanAfterReconnect() {
