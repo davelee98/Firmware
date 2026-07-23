@@ -35,6 +35,20 @@ extern struct GlobalConfig globalConfig;
 enum CommandOrigin { ORIGIN_BLE = 0, ORIGIN_LAN_PLAIN = 1, ORIGIN_LAN_TLS = 2 };
 volatile uint8_t g_commandOrigin = ORIGIN_BLE;
 
+// Transport tag for the RX banner and TX dump. Three transports share this
+// dispatcher (nRF BLE, ESP32 BLE via commandQueue, ESP32 LAN), and without a tag
+// the log cannot show which one a frame took -- in particular whether a frame used
+// the TLS CCM-bypass path. Accurate at every call site below because the LAN
+// listener sets g_commandOrigin immediately around its dispatch. Always "BLE" on
+// nRF and on ESP32 builds without the LAN transport.
+static const char* originTag(void) {
+    switch (g_commandOrigin) {
+        case ORIGIN_LAN_TLS:   return "LAN-TLS";
+        case ORIGIN_LAN_PLAIN: return "LAN";
+        default:               return "BLE";
+    }
+}
+
 static void reloadConfigAfterSave(void) {
     if (!loadGlobalConfig()) {
         writeSerial("WARNING: Config was saved but reload from storage failed (see errors above). "
@@ -108,7 +122,7 @@ static void esp32_queue_ble_notify_copy(const uint8_t* response, uint16_t len, b
     responseQueue[responseQueueHead].len = len;
     responseQueue[responseQueueHead].pending = true;
     responseQueueHead = nextHead;
-    if (!quiet) writeSerial("ESP32: Response queued (queue size: " + String((responseQueueHead - responseQueueTail + RESPONSE_QUEUE_SIZE_LOCAL) % RESPONSE_QUEUE_SIZE_LOCAL) + ")", true);
+    if (!quiet) writeSerial("BLE: response queued (queue size: " + String((responseQueueHead - responseQueueTail + RESPONSE_QUEUE_SIZE_LOCAL) % RESPONSE_QUEUE_SIZE_LOCAL) + ")", true);
 }
 #endif
 
@@ -131,7 +145,7 @@ static const char kFirmwareShaPlaceholder[FIRMWARE_SHA_HEX_BYTES + 1] =
     "0000000000000000000000000000000000000000";
 
 void sendResponseUnencrypted(uint8_t* response, uint16_t len) {
-    writeSerial("Sending unencrypted response (error/status):", true);
+    writeSerial("[" + String(originTag()) + "] Sending unencrypted response (error/status):", true);
     writeSerial("  Length: " + String(len) + " bytes", true);
     writeSerial("  Command: 0x" + String(response[0], HEX) + String(response[1], HEX), true);
     String hexDump = "  Full command: ";
@@ -203,7 +217,7 @@ void sendResponse(uint8_t* response, uint16_t len) {
             uint16_t encrypted_len = 0;
             if (encryptResponse(response, len, encrypted_response, &encrypted_len, nonce, auth_tag)) {
                 if (!quietAck) {
-                    writeSerial("Sending encrypted response:", true);
+                    writeSerial("[" + String(originTag()) + "] Sending encrypted response:", true);
                     writeSerial("  Original length: " + String(len) + " bytes", true);
                     writeSerial("  Encrypted length: " + String(encrypted_len) + " bytes", true);
                 }
@@ -218,7 +232,7 @@ void sendResponse(uint8_t* response, uint16_t len) {
                 len = sizeof(errorResponse);
             }
         } else if (!quietAck) {
-            writeSerial("Sending unencrypted response (authentication/firmware version/error)", true);
+            writeSerial("[" + String(originTag()) + "] Sending unencrypted response (authentication/firmware version/error)", true);
         }
     }
 
@@ -226,8 +240,8 @@ void sendResponse(uint8_t* response, uint16_t len) {
         // One-line TX log: opcode, length, and up to 32 payload bytes (the opcode
         // is also the first two bytes of the dump). Replaces the old 4-line block.
         uint16_t cmd = (response[0] << 8) | response[1];
-        char head[32];
-        snprintf(head, sizeof(head), "BLE: TX 0x%04X (%u B):", cmd, (unsigned)len);
+        char head[48];
+        snprintf(head, sizeof(head), "[%s] TX 0x%04X (%u B):", originTag(), cmd, (unsigned)len);
         String line = head;
         for (int i = 0; i < len && i < 32; i++) {
             char b[4];
@@ -572,8 +586,9 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
     if (!quietCmd) {
         const char* name = commandName(command);
         if (name != nullptr) {
-            char banner[64];
-            snprintf(banner, sizeof(banner), "=== %s COMMAND (0x%04X) ===", name, command);
+            char banner[80];
+            snprintf(banner, sizeof(banner), "=== [%s] %s COMMAND (0x%04X) ===",
+                     originTag(), name, command);
             writeSerial(banner);
         }
     }
@@ -596,14 +611,14 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
     // command directly. BLE and plaintext-LAN frames still honor the CCM gate.
     if (isEncryptionEnabled() && g_commandOrigin != ORIGIN_LAN_TLS) {
         if (!isAuthenticated()) {
-            writeSerial("ERROR: Command requires authentication (encryption enabled)");
+            writeSerial("ERROR: [" + String(originTag()) + "] Command requires authentication (encryption enabled)");
             uint8_t response[] = {RESP_ACK, (uint8_t)(command & 0xFF), RESP_AUTH_REQUIRED};
             sendResponseUnencrypted(response, sizeof(response));
             return;
         }
 
         if (len < BLE_CMD_HEADER_SIZE + ENCRYPTION_NONCE_SIZE + ENCRYPTION_TAG_SIZE) {
-            writeSerial("ERROR: Unencrypted command received when encryption is enabled");
+            writeSerial("ERROR: [" + String(originTag()) + "] Unencrypted command received when encryption is enabled");
             uint8_t response[] = {RESP_ACK, (uint8_t)(command & 0xFF), RESP_AUTH_REQUIRED};
             sendResponseUnencrypted(response, sizeof(response));
             return;

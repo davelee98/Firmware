@@ -1830,7 +1830,12 @@ static void imageWriteLogReset(void) {
 static void imageWriteLogStart(uint32_t totalBytes) {
     imgLogTotalBytes = totalBytes;
     imgLogStartMs = millis();
-    writeSerial("DW start: " + String(totalBytes) + " bytes expected", true);
+    // Whether the sender compressed is decided per transfer (START header flag), not
+    // by config, so the transmission_modes dump at boot does not answer it. State the
+    // active mode here: without it a slow push is ambiguous between "sent raw" and
+    // "compressed but the link is the bottleneck".
+    writeSerial("DW start: " + String(totalBytes) + " bytes expected, " +
+                (directWriteCompressed ? "zlib streaming" : "raw (uncompressed)"), true);
 }
 
 static void imageWriteLogChunk(const uint8_t* data, uint16_t len) {
@@ -1864,8 +1869,18 @@ static void imageWriteLogFinish(uint32_t written, uint32_t total) {
     uint32_t elapsedMs = millis() - imgLogStartMs;   // unsigned wrap-safe over one stream
     String rate = "n/a";
     if (elapsedMs > 0) rate = String((float)written / 1.024f / (float)elapsedMs, 1);  // bytes/ms /1.024 = KB/s
+    String mode = " raw";
+    if (directWriteCompressed) {
+        // On-wire bytes vs bytes handed to the panel: the ratio is the only direct
+        // evidence the stream actually inflated, and it makes a mis-sized or
+        // already-compressed payload obvious.
+        mode = " zlib " + String(directWriteCompressedReceived) + " B on wire";
+        if (directWriteCompressedReceived > 0 && written > 0) {
+            mode += " (" + String((float)written / (float)directWriteCompressedReceived, 2) + "x)";
+        }
+    }
     writeSerial("DW complete: " + String(imgLogChunks) + " chunks, " +
-                String(written) + "/" + String(total) + " bytes, " +
+                String(written) + "/" + String(total) + " bytes," + mode + ", " +
                 String(elapsedMs / 1000.0f, 2) + " s, " + rate + " KB/s", true);
 }
 
