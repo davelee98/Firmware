@@ -17,6 +17,20 @@
 #include "display_seeed_gfx.h"
 #endif
 
+// On ESP32-WiFi builds, route this file's streaming-inflate calls to the ROM `tinfl`
+// engine (src/od_inflate_tinfl.*) instead of the uzlib bit-serial inflater. uzlib
+// (lib/uzlib) is left completely untouched — it is simply not called here. The
+// od_zlib_stream_* call sites below are unchanged; the macros rebind them at compile
+// time. od_zlib_status_t / OD_ZLIB_STATUS_* stay shared (from uzlib.h). See
+// od_inflate_tinfl.h for why (LAN wire >> BLE, so software inflate is the bottleneck).
+#include "od_inflate_tinfl.h"
+#if OPENDISPLAY_USE_TINFL
+#define od_zlib_stream_reset  od_inflate_tinfl_reset
+#define od_zlib_stream_push   od_inflate_tinfl_push
+#define od_zlib_stream_poll   od_inflate_tinfl_poll
+#define od_zlib_stream_error  od_inflate_tinfl_error
+#endif
+
 #ifdef TARGET_NRF
 extern "C" {
 #include "nrf_soc.h"
