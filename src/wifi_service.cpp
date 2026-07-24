@@ -608,33 +608,48 @@ void handleWiFiServer() {
             return;
         }
 
-        while (tcpReceiveBufferPos >= 2) {
-            uint16_t flen = (uint16_t)(tcpReceiveBuffer[0] | (tcpReceiveBuffer[1] << 8));
+        // Parse every complete frame in place with a read cursor, then compact ONCE.
+        // The old code memmove'd the remaining tail to offset 0 after each frame, which
+        // is O(frames x bytes) of PSRAM-speed shuffling per drain (quadratic in the
+        // frame count per fill); a cursor makes it O(one trailing partial frame). Frame
+        // bytes only need to stay valid at their in-buffer position until imageDataWritten
+        // returns -- its handlers copy whatever they retain -- so parsing without moving
+        // is safe. `fill` is snapshotted because a dispatched command can tear the session
+        // down and zero tcpReceiveBufferPos mid-parse (guarded below).
+        uint32_t fill = tcpReceiveBufferPos;
+        uint32_t rpos = 0;
+        while (fill - rpos >= 2) {
+            const uint8_t* f = tcpReceiveBuffer + rpos;
+            uint16_t flen = (uint16_t)(f[0] | (f[1] << 8));
             if (flen == 0 || flen > OD_LAN_MAX_PAYLOAD) {
                 writeSerial("LAN: invalid frame length, closing");
                 disconnectWiFiServer();
                 return;
             }
-            if (tcpReceiveBufferPos < (uint32_t)(2 + flen)) {
-                break;
+            if (fill - rpos < (uint32_t)(2 + flen)) {
+                break;   // partial trailing frame; keep it for the next read
             }
             // F4: tag the frame's origin so the dispatcher bypasses app-layer CCM on
             // TLS (already-secure) and routes the response back over LAN only.
             g_commandOrigin = tlsMode ? ORIGIN_LAN_TLS : ORIGIN_LAN_PLAIN;
             lastLanActivityMs = millis();
-            imageDataWritten(NULL, NULL, tcpReceiveBuffer + 2, flen);
+            imageDataWritten(NULL, NULL, tcpReceiveBuffer + rpos + 2, flen);
             g_commandOrigin = ORIGIN_BLE;   // restore default for any subsequent BLE drain
-            uint32_t consumed = 2u + (uint32_t)flen;
-            uint32_t rem = tcpReceiveBufferPos - consumed;
+            rpos += 2u + (uint32_t)flen;
+            // A dispatched command may have torn the session down (reboot, power-off,
+            // config-driven LAN restart), which zeroes tcpReceiveBufferPos. Stop before
+            // compacting against the stale `fill`; the buffer is discarded on reconnect.
+            if (!wifiServerConnected || !wifiClient.connected()) {
+                return;
+            }
+        }
+        // Single compaction: shift only the trailing partial frame (if any) to offset 0.
+        if (rpos > 0) {
+            uint32_t rem = fill - rpos;
             if (rem > 0) {
-                memmove(tcpReceiveBuffer, tcpReceiveBuffer + consumed, rem);
+                memmove(tcpReceiveBuffer, tcpReceiveBuffer + rpos, rem);
             }
             tcpReceiveBufferPos = rem;
-        }
-        // A dispatched command may have torn the session down (reboot, power-off,
-        // config-driven LAN restart). Never read from a dead client.
-        if (!wifiServerConnected || !wifiClient.connected()) {
-            return;
         }
     } while (got > 0 && drainedBytes < sizeof(tcpReceiveBuffer));
 }
