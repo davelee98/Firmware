@@ -10,6 +10,7 @@
 #include <ESPmDNS.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <esp_heap_caps.h>
 #include <string.h>
 
 #include "mbedtls/ssl.h"
@@ -140,6 +141,19 @@ static int tls_bio_recv(void* ctx, unsigned char* buf, size_t len) {
     return r;
 }
 
+// mbedTLS on this SDK is built with CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=y, so every TLS
+// allocation comes from internal DRAM only -- PSRAM is never eligible, however much of
+// it the board has. ssl_setup alone needs two ~16.4 KB contiguous blocks there
+// (CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN=16384, asymmetric length not set), which is the
+// dominant failure mode once WiFi + BLE coex and the static buffers have taken their cut.
+// Append this to any TLS failure so the log says whether it was OOM and by how much.
+static String tlsFailNote(int ret) {
+    const String code = (ret < 0) ? ("-0x" + String((unsigned)(-ret), HEX)) : String(ret);
+    return String(" (ret=") + code +
+           ", internal free=" + String((unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL)) +
+           ", largest block=" + String((unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)) + ")";
+}
+
 // Build the shared server config once (RNG + PSK + one ECDHE-PSK ciphersuite).
 static bool tlsEnsureConfig(void) {
     if (tlsInited) return true;
@@ -151,23 +165,26 @@ static bool tlsEnsureConfig(void) {
     mbedtls_ctr_drbg_init(&tlsDrbg);
     mbedtls_entropy_init(&tlsEntropy);
     const char* pers = "opendisplay-tls";
-    if (mbedtls_ctr_drbg_seed(&tlsDrbg, mbedtls_entropy_func, &tlsEntropy,
-                              reinterpret_cast<const unsigned char*>(pers), strlen(pers)) != 0) {
-        writeSerial("ERROR: TLS RNG seed failed");
+    int rc = mbedtls_ctr_drbg_seed(&tlsDrbg, mbedtls_entropy_func, &tlsEntropy,
+                                   reinterpret_cast<const unsigned char*>(pers), strlen(pers));
+    if (rc != 0) {
+        writeSerial("ERROR: TLS RNG seed failed" + tlsFailNote(rc));
         return false;
     }
-    if (mbedtls_ssl_config_defaults(&tlsConf, MBEDTLS_SSL_IS_SERVER,
-                                    MBEDTLS_SSL_TRANSPORT_STREAM,
-                                    MBEDTLS_SSL_PRESET_DEFAULT) != 0) {
-        writeSerial("ERROR: TLS config defaults failed");
+    rc = mbedtls_ssl_config_defaults(&tlsConf, MBEDTLS_SSL_IS_SERVER,
+                                     MBEDTLS_SSL_TRANSPORT_STREAM,
+                                     MBEDTLS_SSL_PRESET_DEFAULT);
+    if (rc != 0) {
+        writeSerial("ERROR: TLS config defaults failed" + tlsFailNote(rc));
         return false;
     }
     mbedtls_ssl_conf_rng(&tlsConf, mbedtls_ctr_drbg_random, &tlsDrbg);
     mbedtls_ssl_conf_ciphersuites(&tlsConf, kTlsCiphersuites);
-    if (mbedtls_ssl_conf_psk(&tlsConf, tlsPsk, sizeof(tlsPsk),
-                             reinterpret_cast<const unsigned char*>(kTlsPskIdentity),
-                             strlen(kTlsPskIdentity)) != 0) {
-        writeSerial("ERROR: TLS conf_psk failed");
+    rc = mbedtls_ssl_conf_psk(&tlsConf, tlsPsk, sizeof(tlsPsk),
+                              reinterpret_cast<const unsigned char*>(kTlsPskIdentity),
+                              strlen(kTlsPskIdentity));
+    if (rc != 0) {
+        writeSerial("ERROR: TLS conf_psk failed" + tlsFailNote(rc));
         return false;
     }
     tlsInited = true;
@@ -186,8 +203,11 @@ static void tlsCloseSession(void) {
 static bool tlsBeginSession(void) {
     if (!tlsEnsureConfig()) return false;
     mbedtls_ssl_init(&tlsSsl);
-    if (mbedtls_ssl_setup(&tlsSsl, &tlsConf) != 0) {
-        writeSerial("ERROR: TLS ssl_setup failed");
+    int rc = mbedtls_ssl_setup(&tlsSsl, &tlsConf);
+    if (rc != 0) {
+        // -0x7F00 == MBEDTLS_ERR_SSL_ALLOC_FAILED: the record buffers did not fit in
+        // internal DRAM. Compare "largest block" against ~16.4 KB in the note above.
+        writeSerial("ERROR: TLS ssl_setup failed" + tlsFailNote(rc));
         mbedtls_ssl_free(&tlsSsl);
         return false;
     }
@@ -551,7 +571,9 @@ void handleWiFiServer() {
         } else if (hs == MBEDTLS_ERR_SSL_WANT_READ || hs == MBEDTLS_ERR_SSL_WANT_WRITE) {
             // still handshaking; but honor the idle timeout below
         } else {
-            writeSerial("LAN: TLS handshake failed (" + String(hs) + "), dropping");
+            // The handshake struct is another internal-DRAM allocation, so annotate the
+            // heap here too -- an OOM mid-handshake looks like a protocol error otherwise.
+            writeSerial("LAN: TLS handshake failed" + tlsFailNote(hs) + ", dropping");
             disconnectWiFiServer();
             return;
         }
