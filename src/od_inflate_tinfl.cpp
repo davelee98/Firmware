@@ -1,7 +1,9 @@
 /*
- * od_inflate_tinfl — ESP32-WiFi inflate adapter backed by the ROM miniz `tinfl`.
- * See od_inflate_tinfl.h for the rationale. Compiled to an empty TU when the gate
- * is off (nRF52840 / classic ESP32), so miniz.h is only pulled in on ROM-tinfl builds.
+ * od_inflate_tinfl — ESP32 inflate adapter backed by the ROM miniz `tinfl`.
+ * See od_inflate_tinfl.h for the rationale, the RAM cost, and why the WiFi-keyed
+ * build gate does NOT limit this engine to WiFi traffic (it serves every compressed
+ * path, BLE included). Compiled to an empty TU when the gate is off (nRF52840 /
+ * classic ESP32), so miniz.h is only pulled in on ROM-tinfl builds.
  */
 
 #include "od_inflate_tinfl.h"

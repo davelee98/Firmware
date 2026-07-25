@@ -17,12 +17,20 @@
 #include "display_seeed_gfx.h"
 #endif
 
-// On ESP32-WiFi builds, route this file's streaming-inflate calls to the ROM `tinfl`
+// On ESP32-WiFi BUILDS, route this file's streaming-inflate calls to the ROM `tinfl`
 // engine (src/od_inflate_tinfl.*) instead of the uzlib bit-serial inflater. uzlib
-// (lib/uzlib) is left completely untouched — it is simply not called here. The
-// od_zlib_stream_* call sites below are unchanged; the macros rebind them at compile
-// time. od_zlib_status_t / OD_ZLIB_STATUS_* stay shared (from uzlib.h). See
-// od_inflate_tinfl.h for why (LAN wire >> BLE, so software inflate is the bottleneck).
+// (lib/uzlib) is left completely untouched — it is simply not called here, so the
+// linker drops it. The od_zlib_stream_* call sites below are unchanged; the macros
+// rebind them at compile time. od_zlib_status_t / OD_ZLIB_STATUS_* stay shared
+// (from uzlib.h).
+//
+// This remap is UNCONDITIONAL within such a build — it is not gated per transport, so
+// it rebinds EVERY compressed path in this file: direct-write (0x70/0x71), partial
+// region (0x76), and PIPE_WRITE (0x80-0x82). PIPE_WRITE is BLE-only, so BLE transfers
+// decode through tinfl here too. The WiFi keying of OPENDISPLAY_USE_TINFL selects
+// which builds opt in (the LAN wire is what makes software inflate the bottleneck and
+// justifies tinfl's ~11 KB of DRAM tables); it does NOT restrict the engine to LAN
+// traffic. See od_inflate_tinfl.h for the full rationale and RAM cost.
 #include "od_inflate_tinfl.h"
 #if OPENDISPLAY_USE_TINFL
 #define od_zlib_stream_reset  od_inflate_tinfl_reset
