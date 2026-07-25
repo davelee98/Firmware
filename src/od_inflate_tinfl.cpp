@@ -11,14 +11,42 @@
 #include <string.h>
 #include "miniz.h"   /* ROM tinfl on S3/C3/C6 (symbol via <chip>.rom.ld, header via esp_rom) */
 
+/* ---------------------------------------------------------- dictionary size ---
+ * The LZ dictionary IS the DEFLATE lookback window, so it only has to be as large
+ * as the window senders actually use: a match can never reference further back than
+ * the window, making any bytes beyond it unreachable — never read as history. Sized
+ * from the firmware's single window knob (OPENDISPLAY_ZLIB_WINDOW_BITS, default 9 =>
+ * 512 B; env:esp32-s3-E1004 pins 15 => 32768) so both inflate engines honor one
+ * contract and cannot drift apart. This is a pure RAM reclaim, not a tradeoff: the
+ * wire bytes are unchanged.
+ *
+ * NOTE: the dictionary is OURS, not tinfl's — `tinfl_decompressor` holds only the
+ * Huffman tables, and tinfl takes the ring as a caller-supplied buffer, so this array
+ * is the whole cost. TINFL_LZ_DICT_SIZE (32768) is a bare SDK #define that allocates
+ * nothing; it is deliberately NOT redefined here.
+ *
+ * Two tinfl requirements, both guaranteed by uzlib.h constraining BITS to 9..15:
+ *   - power of 2: tinfl derives its wrap mask from the buffer geometry passed in.
+ *   - >= the window declared in the stream's CMF byte, else tinfl rejects the stream
+ *     at the zlib header (a clean decode error, never silent corruption).
+ */
+#define OD_TINFL_DICT_SIZE OPENDISPLAY_ZLIB_WINDOW_SIZE
+#if (OD_TINFL_DICT_SIZE & (OD_TINFL_DICT_SIZE - 1u)) != 0 || OD_TINFL_DICT_SIZE < 512u
+#error "OD_TINFL_DICT_SIZE must be a power of 2 and >= 512"
+#endif
+
 /* ------------------------------------------------------------------ state ---
  * All static: plain arrays land in internal .bss/DRAM automatically, which is
  * exactly what the history/output ring needs (fast match reads). The framebuffer
  * is in PSRAM, so we decode into this SRAM ring and let the caller flush each
  * delivered burst sequentially to PSRAM — never decode directly into PSRAM.
+ * s_dict is explicitly aligned: tinfl's fast match-copy path does 32-bit loads and
+ * stores through this pointer, which a 32 KB array got incidentally but a 512-byte
+ * one should not rely on.
  */
 static tinfl_decompressor s_decomp;                 /* ~11 KB Huffman tables + bit buffer */
-static uint8_t            s_dict[TINFL_LZ_DICT_SIZE]; /* 32768: LZ77 history AND output ring */
+static uint8_t            s_dict[OD_TINFL_DICT_SIZE] __attribute__((aligned(16)));
+                                                    /* LZ77 history AND output ring */
 
 static size_t   s_dict_ofs;      /* tinfl next-write position in the ring */
 static size_t   s_deliver_ofs;   /* start of the undelivered (pending) region */
@@ -101,7 +129,7 @@ od_zlib_status_t od_inflate_tinfl_poll(uint8_t *output, size_t capacity, size_t 
          *    can never overwrite bytes we have not delivered yet). Bound output to the
          *    room up to the ring end; the wrap is handled by re-entering the loop. */
         size_t in_bytes = s_in_remaining;
-        size_t out_bytes = TINFL_LZ_DICT_SIZE - s_dict_ofs;
+        size_t out_bytes = OD_TINFL_DICT_SIZE - s_dict_ofs;
         const mz_uint32 flags = (mz_uint32)(TINFL_FLAG_PARSE_ZLIB_HEADER |
                                             (s_more_input ? TINFL_FLAG_HAS_MORE_INPUT : 0));
         s_deliver_ofs = s_dict_ofs;  /* the pending region will start where tinfl writes */
@@ -115,7 +143,7 @@ od_zlib_status_t od_inflate_tinfl_poll(uint8_t *output, size_t capacity, size_t 
         s_in_remaining -= in_bytes;
         s_produced += (uint32_t)out_bytes;
         s_pending = out_bytes;
-        s_dict_ofs = (s_dict_ofs + out_bytes) & (TINFL_LZ_DICT_SIZE - 1u);
+        s_dict_ofs = (s_dict_ofs + out_bytes) & (OD_TINFL_DICT_SIZE - 1u);
 
         if (st < TINFL_STATUS_DONE) {  /* negative status codes are fatal */
             s_error = (st == TINFL_STATUS_ADLER32_MISMATCH) ? "tinfl adler32 mismatch"
