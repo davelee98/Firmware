@@ -13,28 +13,55 @@
 #include <string.h>
 #include "miniz.h"   /* ROM tinfl on S3/C3/C6 (symbol via <chip>.rom.ld, header via esp_rom) */
 
-/* ---------------------------------------------------------- dictionary size ---
- * The LZ dictionary IS the DEFLATE lookback window, so it only has to be as large
- * as the window senders actually use: a match can never reference further back than
- * the window, making any bytes beyond it unreachable — never read as history. Sized
- * from the firmware's single window knob (OPENDISPLAY_ZLIB_WINDOW_BITS, default 9 =>
- * 512 B; env:esp32-s3-E1004 pins 15 => 32768) so both inflate engines honor one
- * contract and cannot drift apart. This is a pure RAM reclaim, not a tradeoff: the
- * wire bytes are unchanged.
+/* ------------------------------------------------------- dictionary/ring size ---
+ * This buffer serves TWO roles with DIFFERENT size requirements:
+ *
+ *  1) LZ77 history — the correctness FLOOR, equal to the DEFLATE window. A match can
+ *     never reference further back than the window, so bytes beyond it are unreachable
+ *     (never read as history). tinfl additionally REJECTS a stream whose CMF byte
+ *     declares a window larger than this buffer — a clean decode error at the zlib
+ *     header, never silent corruption — so the size must be >= the window.
+ *
+ *  2) Output staging ring — SPEED. tinfl's bulk paths need CONTIGUOUS headroom to the
+ *     ring end: symbol decode wants a couple of bytes, and the 8-bytes-at-a-time match
+ *     copy wants headroom >= the match length. DEFLATE's max match is 258 bytes
+ *     (RFC 1951 length codes 257..285; cf. length_base[] in lib/uzlib/src/od_zlib_stream.c),
+ *     so at a 512-byte ring a long match is often too close to the wrap and falls back
+ *     to the slow byte-at-a-time copy. The share of output affected scales as
+ *     match_len/ring_size, i.e. it halves per doubling with no threshold — ~50% at 512
+ *     vs ~6% at 4096 for worst-case 258-byte matches. E-paper images have large uniform
+ *     regions, which compress into long (often max-length) matches, so the worst case is
+ *     representative here rather than rare.
+ *
+ * Sizing rule:
+ *   - 9-bit window (512, the default): use 4096. The window alone leaves too little
+ *     staging headroom; 4096 restores the bulk paths while still reclaiming ~28 KB of
+ *     internal DRAM versus the old unconditional 32768.
+ *   - window > 9 bits: use the window size exactly. It already provides ample headroom,
+ *     so padding beyond the correctness floor would only waste DRAM.
+ *     (env:esp32-s3-E1004 pins BITS=15 => 32768, unchanged.)
+ *
+ * Overridable per-env via -DOD_TINFL_DICT_SIZE=<power of 2> to trade RAM against speed.
  *
  * NOTE: the dictionary is OURS, not tinfl's — `tinfl_decompressor` holds only the
  * Huffman tables, and tinfl takes the ring as a caller-supplied buffer, so this array
  * is the whole cost. TINFL_LZ_DICT_SIZE (32768) is a bare SDK #define that allocates
  * nothing; it is deliberately NOT redefined here.
- *
- * Two tinfl requirements, both guaranteed by uzlib.h constraining BITS to 9..15:
- *   - power of 2: tinfl derives its wrap mask from the buffer geometry passed in.
- *   - >= the window declared in the stream's CMF byte, else tinfl rejects the stream
- *     at the zlib header (a clean decode error, never silent corruption).
  */
-#define OD_TINFL_DICT_SIZE OPENDISPLAY_ZLIB_WINDOW_SIZE
-#if (OD_TINFL_DICT_SIZE & (OD_TINFL_DICT_SIZE - 1u)) != 0 || OD_TINFL_DICT_SIZE < 512u
-#error "OD_TINFL_DICT_SIZE must be a power of 2 and >= 512"
+#ifndef OD_TINFL_DICT_SIZE
+#  if OPENDISPLAY_ZLIB_WINDOW_BITS == 9
+#    define OD_TINFL_DICT_SIZE 4096u                          /* staging headroom */
+#  else
+#    define OD_TINFL_DICT_SIZE OPENDISPLAY_ZLIB_WINDOW_SIZE   /* window is ample */
+#  endif
+#endif
+/* Power of 2: tinfl derives its wrap mask from the buffer geometry passed in.
+ * >= window: else tinfl rejects the stream at the zlib header (see (1) above). */
+#if (OD_TINFL_DICT_SIZE & (OD_TINFL_DICT_SIZE - 1u)) != 0
+#error "OD_TINFL_DICT_SIZE must be a power of 2"
+#endif
+#if OD_TINFL_DICT_SIZE < OPENDISPLAY_ZLIB_WINDOW_SIZE
+#error "OD_TINFL_DICT_SIZE must be >= OPENDISPLAY_ZLIB_WINDOW_SIZE (the DEFLATE window)"
 #endif
 
 /* ------------------------------------------------------------------ state ---

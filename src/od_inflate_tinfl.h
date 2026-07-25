@@ -25,9 +25,10 @@
  * the same speedup for free; the LAN wire is just what made it necessary.
  *
  * COST: ~11 KB of internal DRAM for the Huffman tables (tinfl_decompressor), plus a
- * caller-supplied LZ dictionary sized to the DEFLATE window (see OD_TINFL_DICT_SIZE
- * in od_inflate_tinfl.cpp — 512 B at the default 9-bit window, not the 32 KB the
- * TINFL_LZ_DICT_SIZE constant suggests). vs ~2.5 KB for uzlib at the same window.
+ * caller-supplied LZ dictionary/output ring (see OD_TINFL_DICT_SIZE in
+ * od_inflate_tinfl.cpp — 4 KB at the default 9-bit window, sized for decode-path
+ * headroom rather than the 32 KB the TINFL_LZ_DICT_SIZE constant suggests; a window
+ * wider than 9 bits sizes it to the window instead). vs ~2.5 KB for uzlib.
  *
  * The status enum (od_zlib_status_t, OD_ZLIB_STATUS_*) is defined by uzlib.h; we
  * only include it, never modify it.
