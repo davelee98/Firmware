@@ -71,19 +71,19 @@ on another.
 | **P2-3** | `epdRefreshInProgress` around both boot-refresh paths | `display_service.cpp` | both | Low |
 | **P2-4** | Make `fastepd_wait_refresh` a real bounded LUT wait | `display_fastepd.cpp` | ESP32/E1004 | Medium |
 | ~~P2-5~~ | ~~Wall-clock cap on the loop command drain~~ — ❌ **DROPPED** (rationale did not survive checking; see D-F) | — | — | — |
-| **P2-6** | Delete the inert TWDT flag; document the real one | `platformio.ini`, `main.cpp` | ESP32 | None (build-flag only) |
+| ~~P2-6~~ | ~~Delete the inert TWDT flag; document the real one~~ — ❌ **DROPPED** (owner decision) | — | — | — |
 | **P2-7** | *(optional)* `Wire.setTimeOut(25)` — **ESP32 only, the API does not exist on nRF** | `display_service.cpp` | ESP32 | Low |
 | **P2-8** | `waitforrefresh` → wall-clock deadline, not an iteration count | `display_service.cpp` | **both (nRF-critical)** | Low |
 | ~~P2-9~~ | ~~Loop-liveness heartbeat + monitor task~~ — ❌ **DROPPED** (owner decision) | — | — | — |
 
-> **Scope cut 2026-07-26 (owner decision): P2-1, P2-2 and P2-9 are DROPPED**, joining P2-5.
-> Phase 2 is now **P2-3, P2-4, P2-6, P2-8**, with P2-7 still optional. Each dropped item keeps its
+> **Scope cut 2026-07-26 (owner decision): P2-1, P2-2, P2-6 and P2-9 are DROPPED**, joining P2-5.
+> Phase 2 is now **P2-3, P2-4, P2-8**, with P2-7 still optional. Each dropped item keeps its
 > full specification below, struck through, with its residual cost stated.
 >
-> What survives is the part that makes refreshes *bounded and visible to the supervisor*: the real
-> `waitforrefresh` deadline (P2-8), the real FastEPD wait (P2-4), `epdRefreshInProgress` covering the
-> boot paths (P2-3), and the TWDT documentation fix (P2-6). What is gone is everything that added a
-> new mechanism — the lock deadline, the button bound, and the monitor task.
+> What survives is exactly the refresh path: the real `waitforrefresh` deadline (P2-8), the real
+> FastEPD wait (P2-4), and `epdRefreshInProgress` covering the boot paths (P2-3). Everything that
+> added a new mechanism is gone (the lock deadline, the button bound, the monitor task), and so is
+> the one documentation-only item (P2-6). **Three items, two files, one subsystem.**
 >
 > **Net effect on the phase's own thesis.** Phase 2 opened by defining a bound as binding only if it
 > (1) executes, (2) has a live timebase, and (3) is observable by a third party. With P2-9 dropped,
@@ -91,9 +91,9 @@ on another.
 > fails condition 1 as well. Phase 2 is now a *narrower* claim than it set out to make: it bounds
 > the refresh paths, and defers detection of a stalled `loop()` to Phase 6.
 
-Suggested landing order: **P2-6 → P2-3 → P2-8 → P2-4** (+ P2-7 if D-G flips). All four are
-low-risk and independent. Phase 2 no longer touches the `main.cpp` drain loop at all, so there is no
-conflict with Phase 3's `[M5]`, and `src/main.cpp` is touched only by P2-6's comment.
+Suggested landing order: **P2-3 → P2-8 → P2-4** (+ P2-7 if D-G flips). All three are low-risk
+and independent. Phase 2 no longer touches `src/main.cpp` or `platformio.ini` at all, so there is no conflict with
+Phase 3's `[M5]` drain-trap fix.
 
 ---
 
@@ -160,7 +160,7 @@ outside `loop()` — though nothing in Phase 2 currently needs to.
 | **P2-3** `epdRefreshInProgress` | ✅ 4 consumers | ⚠️ **flag is set but has ZERO consumers on nRF** — all four live in ESP32-only code ([ble_init.cpp:236](../src/ble_init.cpp), [main.cpp:322](../src/main.cpp), [:478](../src/main.cpp), + Phase 6) | set it anyway (correct, cheap, and Phase 6 adds the nRF consumers); **note the inertness in the commit message** |
 | **P2-4** FastEPD | ✅ | **n/a** — `OPENDISPLAY_FASTEPD` is ESP32-only (`platformio.ini:54, 84, 113, 254`) | nRF's only refresh bound is `waitforrefresh` → **P2-8** |
 | ~~**P2-5**~~ drain cap ❌ dropped | — | **n/a by design** — nRF has no command queue; `imageDataWritten` runs inline on the Bluefruit **callback task (prio 2)**, which *preempts* `loop()` (prio 1) | see "different failure mode" below |
-| **P2-6** TWDT flag | ✅ | **n/a** — no such flag, and no watchdog to describe | document the *absence*; ~~→ P2-9~~ (dropped — the absence is now recorded and left standing) |
+| ~~**P2-6**~~ TWDT flag ❌ dropped | — | — | inert flag left in place on ESP32; nRF's watchdog absence left undocumented |
 | **P2-7** `Wire.setTimeOut` | ✅ default 50 ms, settable | ❌ **API absent**, and the TWIM driver busy-spins with *no* timeout (`Wire_nRF52.cpp:166-181`) | ESP32-only; the nRF gap is **D-L** |
 
 Two structural observations fall out of that table:
@@ -786,7 +786,29 @@ the vestigial `pending` field. If P2-5 is kept after all, land it before Phase 3
 
 ---
 
-## P2-6 — Delete the inert TWDT flag, document the real one
+## ~~P2-6~~ — Delete the inert TWDT flag, document the real one — ❌ **DROPPED**
+
+*Dropped 2026-07-26 by owner decision.* **Not implemented in Phase 2.**
+`-DCONFIG_FREERTOS_WATCHDOG_TIMEOUT_S=120` stays in all 9 ESP envs
+(`platformio.ini:53, 83, 112, 140, 189, 209, 229, 253, 295`), and no comment is added recording the
+real setting.
+
+**Residual: a misleading dead knob stays in the tree.** The symbol is not an IDF 5.x setting — the
+real one is `CONFIG_ESP_TASK_WDT_TIMEOUT_S`, and the precompiled `sdkconfig.h` wins regardless, so
+the true watchdog is **5 s / panic on IDLE0 starvation**, not the 120 s the flag implies. Today's
+30–60 s waits survive only because every one of them yields. The next reader of `platformio.ini`
+has no way to know that from the tree. Not a freeze risk — the flag has never done anything — but
+it is a live source of wrong conclusions, and it is the cheapest item in the phase (a build-flag
+deletion plus one comment). Worth revisiting whenever anything else touches `platformio.ini`.
+
+**Consequence:** Phase 2 now touches **no build configuration and no `src/main.cpp`** — the item was
+the only reason for either.
+
+The original specification is retained below for the record.
+
+---
+
+### Original specification *(retained for the record — not implemented)*
 
 Remove `-DCONFIG_FREERTOS_WATCHDOG_TIMEOUT_S=120` from all 9 ESP envs (`platformio.ini:53, 83, 112,
 140, 189, 209, 229, 253, 295`). It is an IDF 4.x symbol name; IDF 5.x uses
@@ -1278,9 +1300,9 @@ fault class we cannot recover from anyway. Add it to the parent plan's residual-
 | ~~`src/session_monitor.cpp/.h`~~ *(new)* | ~~P2-9~~ — dropped, **no new file in Phase 2** | — |
 | `src/display_fastepd.cpp` | P2-4 | ESP32 |
 | ~~`src/power_latch.cpp`~~ | ~~P2-2~~ — dropped | — |
-| `src/main.cpp` | P2-6 (comment) only — **the drain loop is untouched** | both |
-| `platformio.ini` | P2-6 | ESP32 |
-| `docs/TIMER_AND_WATCHDOG_INVENTORY_2026-07-26.md` | P2-6 (record that nRF has **no** watchdog and that Phase 2 adds none) | — |
+| ~~`src/main.cpp`~~ | ~~P2-6 (comment)~~ — dropped; **Phase 2 does not touch `main.cpp` at all** | — |
+| ~~`platformio.ini`~~ | ~~P2-6~~ — dropped; **no build-config change in Phase 2** | — |
+| ~~`docs/TIMER_AND_WATCHDOG_INVENTORY_2026-07-26.md`~~ | ~~P2-6~~ — dropped | — |
 | `docs/PLAN_FREEZE_PROOFING_2026-07-26.md` | D-D (`[X3]` downgrade), **the scope cut: § Phase 2 must drop P2-1/P2-2/P2-5/P2-9 and move their residuals to Phase 6's remit**, D-K (residual) | — |
 
 ~~`src/session_monitor.*` is deliberately not `src/session_guard.*`…~~ — moot with P2-9 dropped.
@@ -1320,13 +1342,15 @@ nothing to it unless P2-8/P2-9 grow host-testable pure logic, which is worth con
 
 ### Static
 
-- `grep -rn "CONFIG_FREERTOS_WATCHDOG_TIMEOUT_S" platformio.ini` → no hits.
+- ~~`grep -rn "CONFIG_FREERTOS_WATCHDOG_TIMEOUT_S" platformio.ini` → no hits.~~ — moot, P2-6
+  dropped; the flag stays and `platformio.ini` must be **unchanged**.
 - ~~`pwrmgmLockTake` call sites / lost-`Give` audit~~ — moot, P2-1 dropped; `pwrmgmLockTake()` keeps
   its `void` signature and every existing call site is unchanged. **Confirm the diff does not touch
   it**, which is now the check that matters.
 - ~~`sessionMonitorHeartbeat` placement, P2-9 stack-size units~~ — moot, P2-9 dropped.
-- `git diff --stat` should show **no new files** and no change to `src/main.cpp` beyond P2-6's
-  comment. If either appears, scope has crept back in.
+- `git diff --stat` should show **no new files**, and changes confined to
+  `src/display_service.cpp` and `src/display_fastepd.cpp`. Any touch to `src/main.cpp` or
+  `platformio.ini` means scope has crept back in.
 
 ### Hardware — both targets
 
@@ -1373,6 +1397,10 @@ plan's blanket requirement.
   design: interrupting a refresh is worse than waiting for it. What bounds it is P2-4/P2-8, not P2-5.
 - **A saturated drain costs ~1 s of unserviced touch/buttons.** Measured-order estimate, not a
   freeze, and accepted — see D-F.
+- **The inert `CONFIG_FREERTOS_WATCHDOG_TIMEOUT_S=120` flag stays in 9 ESP envs (P2-6 dropped)**,
+  still reading like a 120 s watchdog guarantee that does not exist. Harmless to execution, but a
+  standing trap for the next reader of `platformio.ini`. nRF's total absence of a watchdog also goes
+  unrecorded.
 - **Phase 2's own thesis is only partly delivered.** Of the three conditions for a "binding" bound,
   condition 3 (observable by a third party) is now met by nothing, and condition 1 fails for the
   panel lock. Phase 2 delivers *bounded refreshes*; it does not deliver *detected stalls*.
