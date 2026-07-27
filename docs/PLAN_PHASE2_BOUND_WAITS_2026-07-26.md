@@ -1,13 +1,33 @@
 # Phase 2 Implementation Plan — Bound Every Unbounded Wait
 
-**Branch:** `debug/ble-hardening` · **Date:** 2026-07-26
+**Branch:** `debug/freeze-fix-phase2` (branched from Phase 1 as-built) · **Date:** 2026-07-26
 **Parent plan:** [`PLAN_FREEZE_PROOFING_2026-07-26.md`](PLAN_FREEZE_PROOFING_2026-07-26.md) § "Phase 2"
 **Review that shaped it:** [`FINDINGS_FREEZE_PROOFING_PLAN_REVIEW_2026-07-26.md`](FINDINGS_FREEZE_PROOFING_PLAN_REVIEW_2026-07-26.md) `[C2] [X1] [X2] [X3] [L3]`
 
 Phase 2 is the *defensive floor* the later phases stand on. It adds no new subsystem and no new
 state machine: it puts a wall-clock bound on each place where `loop()` can block indefinitely, and
 it makes the one gate the supervisor depends on (`epdRefreshInProgress`) actually cover every
-refresh. It is independent of Phase 1 and can land before or after it.
+refresh.
+
+> **Adjusted 2026-07-26 for Phase 1 as-built.** Phase 1 has shipped (`02bdd5c`..`d62cb29`) and this
+> branch is cut from it, so the "independent, can land before or after" framing is now moot in
+> practice: Phase 2 lands *on top of* Phase 1. Three concrete consequences, folded in below.
+>
+> 1. **The `esp32-N4` RAM gate moved in Phase 2's favour, not against it.** Phase 1 did *not* ship
+>    `replay_window[256]` (+1,536 B) as this plan assumed. Decision B changed to a 32 B sliding
+>    bitmap replacing the 512 B ring, so Phase 1 **gave back 480 B**: `esp32-N4` measured
+>    81,940 → **81,468 B**. P2-9's ~2 KB task stack has *more* headroom than budgeted here.
+> 2. **P2-9's core premise is now confirmed by shipped code, not just by reading the core.** Phase 1's
+>    `23ecaed` was forced to drop the BLE link *inline from the nRF callback task* precisely because
+>    `loop()` is starved mid-transfer — the same starvation P2-9 exists to observe. The priority
+>    facts in the table below were independently re-verified during that work.
+> 3. **Phase 1 pulled Phase 5's link-drop forward** (an auth-gate guard that disconnects after 10
+>    consecutive unauthenticated commands). Phase 2 does not interact with it, but it means an
+>    out-of-`loop()` actor that drops the link **already exists** on nRF — relevant context for D-H
+>    and D-I, which assumed P2-9 would be the first such actor. Neither decision is reopened here.
+>
+> Line references to `src/main.cpp` and `src/communication.cpp` in this plan were taken against
+> `02bdd5c`; Phase 1 modified both, so re-anchor before editing rather than trusting a line number.
 
 **Both targets, or it does not count.** Every bound here must be *binding* on `nrf52840custom` as
 well as the ESP32 envs — executing, measured in a clock that keeps running, and observable when
@@ -86,11 +106,24 @@ ESP32 facts are from the precompiled `sdkconfig.h` (see `[L3]` above). nRF facts
 `~/.platformio/packages/framework-arduinoadafruitnrf52-seeed`, the core the `nrf52840custom` env
 actually builds against (`platformio.ini:29-32`).
 
+**The two nRF priority rows are no longer theory.** Phase 1's `23ecaed` had to move the BLE
+link-drop *inline into the callback task* because deferring it to `loop()` did not execute during a
+transfer — the loop task (priority 1) is starved by the callback task (2) and the Bluefruit task
+(3), and on nRF `loop()` reaches its service calls only after `idleDelay(sleep_timeout_ms)`. That is
+the same starvation P2-9 exists to detect, now observed on hardware rather than inferred. It
+strengthens P2-9's case and is the strongest single argument that a loop-serviced bound is **not**
+binding on nRF mid-transfer — the premise behind condition 2 below.
+
+The same work established that `Bluefruit.disconnect()` is safe from callback context (it defers to
+`sd_ble_gap_disconnect()`, and the disconnect callback is serialized behind the write callback on
+the one `ada_callback` queue). Useful precedent if any Phase 2 item is ever tempted to act from
+outside `loop()` — though nothing in Phase 2 currently needs to.
+
 | | ESP32 (Arduino / IDF 5.5.4) | nRF52840 (Adafruit/Seeed core) |
 |---|---|---|
 | RTOS | FreeRTOS, dual-core (S3/classic), single (C3/C6) | FreeRTOS, single core, `configMAX_PRIORITIES 5`, tick **1024 Hz** (`FreeRTOSConfig.h:55-56`) |
-| `loop()` task priority | 1 | 1 — `TASK_PRIO_LOW` (`cores/nRF5/main.cpp:88`, `rtos.h:58`) |
-| Higher-priority tasks | NimBLE host task | Callback task = 2, **Bluefruit task = 3** (`rtos.h:59-61`) |
+| `loop()` task priority | 1 | 1 — `TASK_PRIO_LOW` (`cores/nRF5/main.cpp:88`, `rtos.h:58`) ✅ re-verified in Phase 1 |
+| Higher-priority tasks | NimBLE host task | Callback task = 2, **Bluefruit task = 3** (`rtos.h:59-61`) ✅ re-verified in Phase 1 |
 | `delay()` | `vTaskDelay` — yields | `vTaskDelay` — yields (`cores/nRF5/delay.c:33-49`) |
 | **`millis()` source** | `esp_timer_get_time()/1000` — **hardware timer** | **`tick2ms(xTaskGetTickCount())` — FreeRTOS tick** (`delay.c:29-31`, `rtos.h:65`) |
 | Tickless idle | n/a for the timebase | `configUSE_TICKLESS_IDLE 1` (`FreeRTOSConfig.h:52`) |
@@ -291,10 +324,16 @@ Phase 6's 10-minute supervisor. See D-J.
 ### Cost
 
 One task, ~2 KB stack + TCB, plus two `uint32_t` and a `const char*`. nRF52840 has 256 KB RAM and is
-not a concern. **`esp32-N4` is the gate** — it already needs `PIPE_SMALL_DRAM_WINDOW` to fit, and it
-is the same env Phase 1's `replay_window[256]` is gated on. If both phases land, check the combined
-`.bss`/heap headroom, not each in isolation. If `esp32-N4` will not fit, the fallback is to compile
-P2-9 out on that env alone (`-DOPENDISPLAY_NO_LOOP_MONITOR`) rather than to shrink the stack.
+not a concern. **`esp32-N4` is still the gate** — it needs `PIPE_SMALL_DRAM_WINDOW` to fit at all —
+but the combined-headroom warning that stood here is obsolete in Phase 2's favour: Phase 1 shipped a
+**32 B bitmap in place of the 512 B ring**, not the `replay_window[256]` this plan was written
+against, so it *returned* 480 B rather than consuming 1,536. Measured on the as-built branch:
+`esp32-N4` **81,468 B** vs the 81,940 B pre-Phase-1 baseline.
+
+So P2-9 starts with ~480 B more room than budgeted. Still measure the link rather than assume — the
+figure that matters is the successful link, not the percentage — but the fallback (compile P2-9 out
+on that env alone via `-DOPENDISPLAY_NO_LOOP_MONITOR`, rather than shrinking the stack) is now less
+likely to be needed.
 
 ### Rejected: the nRF hardware WDT
 
@@ -1181,10 +1220,15 @@ pio run -e nrf52840custom -e esp32-s3-N16R8 -e esp32-c3-N16 -e esp32-c6-N4 -e es
 ```
 
 `esp32-s3-E1004` is added to the parent plan's set because it is the FastEPD/IT8951 gate for P2-4.
-CI builds all 11 on push. Items P2-1…P2-8 add no meaningful `.bss` (one `bool`, a few `uint32_t`
-locals). **P2-9 adds a ~2 KB task stack, and `esp32-N4` is the gate** — the same env Phase 1's
-`replay_window[256]` is gated on, so if both phases land, check combined headroom rather than each
-in isolation.
+CI builds all **12** envs on push (`esp32-s3-N16R8-extuart-debug` is easy to miss when counting
+from `platformio.ini`). Items P2-1…P2-8 add no meaningful `.bss` (one `bool`, a few `uint32_t`
+locals). **P2-9 adds a ~2 KB task stack, and `esp32-N4` is the gate.** Phase 1 as-built *freed*
+480 B there (81,940 → 81,468 B), so the headroom is better than this plan originally assumed — see
+"Cost" under P2-9. Compare the new figure against **81,468 B**, not the pre-Phase-1 baseline.
+
+CI now also runs a `host-tests` job (added by Phase 1) alongside the 12-env matrix; Phase 2 adds
+nothing to it unless P2-8/P2-9 grow host-testable pure logic, which is worth considering for the
+`waitforrefresh` deadline arithmetic.
 
 ### Static
 
