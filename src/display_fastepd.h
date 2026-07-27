@@ -23,7 +23,10 @@ bool fastepd_init_failed(void);
 void fastepd_prepare_hardware(void);
 void fastepd_epaper_begin(void);
 void fastepd_full_update(void);
-bool fastepd_wait_refresh(int timeout_sec);
+/** True while the IT8951 is still driving the waveform. Poll predicate for
+ *  waitForPanelIdle() in display_service.cpp, which owns the timing loop and the
+ *  timeout; this driver supplies no bound of its own. */
+bool fastepd_refresh_busy(void);
 void fastepd_sleep_after_refresh(void);
 
 void fastepd_boot_write_row(uint16_t y, const uint8_t* row, unsigned pitch);

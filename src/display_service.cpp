@@ -537,8 +537,18 @@ static bool refreshBootScreenFull() {
     }
     od_log_info("EPD refresh: FULL (boot)");
     touchSuspendForEpdRefresh();
+    // A boot refresh occupies the panel for exactly as long as a transfer refresh —
+    // ~30 s worst case on a Spectra 6-colour panel, a second or two on IT8951 — so
+    // the consumers of this flag — BLE advertising (ble_init.cpp), the deferred
+    // disconnect cleanup and the deep-sleep gate (main.cpp) — must see the device as
+    // busy for the whole of it. The render-failure path above returns before the flag
+    // is raised, so there is nothing to leak there.
+    // NOTE: inert on nRF today; every consumer is currently ESP32-only.
+    epdRefreshInProgress = true;
     bbepRefresh(&bbep, REFRESH_FULL);
-    return waitforrefresh(60);
+    bool bootRefreshOk = waitforrefresh(60);
+    epdRefreshInProgress = false;
+    return bootRefreshOk;
 }
 
 static void cleanup_partial_write_state(void);
@@ -744,35 +754,71 @@ uint8_t e1004_cs2_pin(void) {
     return p;
 }
 
+// The one bounded refresh wait. Every panel driver polls through here; a driver
+// contributes only its busy predicate (true while the panel is still refreshing),
+// never its own timing loop.
+//
+// The bound is WALL CLOCK, not an iteration count. delay() is vTaskDelay, which
+// guarantees only a *minimum*, so the old `timeout * 100` iterations of delay(10)
+// measured scheduled time for the calling task rather than elapsed time. That is
+// exactly wrong on nRF, where loop() runs at TASK_PRIO_LOW and is starved by the
+// callback and Bluefruit tasks — the one situation where a refresh cap has to hold.
+// Signed-difference comparison so the 49.7-day millis() wrap is handled.
+//
+// Poll at 10 ms (was 100 ms) so a ~0.5 s refresh returns up to ~90 ms sooner; dot
+// cadence every 50 polls keeps ~0.5 s/dot.
+//
+// neverStartedError, when non-null, turns "already idle at the first poll" into that
+// error instead of success. bb_epaper asserts BUSY within µs of MASTER_ACTIVATE, so
+// a still-idle panel 10 ms in means the refresh never started — a distinct failure
+// from a timeout. The IT8951 gets no such check: both its paths end on an HRDY wait
+// (it8951WaitForReady), not a LUT wait, so we do not know how promptly LUTAFSR latches
+// non-zero after the display command — an idle first poll could be a false alarm.
+static bool waitForPanelIdle(int timeout, const char* what, bool (*panelBusy)(void),
+                             const char* neverStartedError) {
+    const uint32_t startMs = millis();
+    const uint32_t deadlineMs = startMs + (uint32_t)(timeout > 0 ? timeout : 0) * 1000u;
+    for (size_t polls = 0; ; polls++) {
+        delay(10);
+        if (polls % 50 == 0) od_log_raw(".");
+        if (!panelBusy()) {
+            if (polls == 0 && neverStartedError) {
+                od_log_error("%s", neverStartedError);
+                return false;
+            }
+            od_log_raw(".\n");
+            od_log_info("Refresh took %u ms (%s)", (unsigned)(millis() - startMs), what);
+            return true;
+        }
+        if ((int32_t)(millis() - deadlineMs) >= 0) break;
+    }
+    od_log_raw("\n");
+    od_log_warn("Refresh timed out after %u ms (%s)", (unsigned)(millis() - startMs), what);
+    return false;
+}
+
+static bool bbepPanelBusy(void) { return bbepIsBusy(&bbep) != 0; }
+
+#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+// Thin C++-linkage wrapper so the predicate's type matches waitForPanelIdle's
+// parameter regardless of how the extern "C" declaration is spelled.
+static bool fastepdPanelBusy(void) { return fastepd_refresh_busy(); }
+#endif
+
 bool waitforrefresh(int timeout){
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
-    if (fastepd_driver_used()) return fastepd_wait_refresh(timeout);
+    if (fastepd_driver_used()) {
+        if (fastepd_init_failed()) return false;
+        return waitForPanelIdle(timeout, "FastEPD", fastepdPanelBusy, nullptr);
+    }
 #endif
     if (e1004_panel_used() && !bbepIsBusy(&bbep)) {
         // bbepRefresh already waited; idle here means refresh finished.
         od_log_info("Refresh completed inside bb_epaper");
         return true;
     }
-    // Poll at 10 ms (was 100 ms) so a ~0.5 s refresh returns up to ~90 ms sooner.
-    // BUSY asserts within µs of MASTER_ACTIVATE, so the i==0 "never went busy"
-    // error check stays valid at a 10 ms first poll. Loop bound scales x10
-    // (timeout*100 iterations of 10 ms); dot cadence every 50 iters keeps ~0.5 s/dot.
-    for (size_t i = 0; i < (size_t)(timeout * 100); i++){
-        delay(10);
-        if(i % 50 == 0) od_log_raw(".");
-        if(!bbepIsBusy(&bbep)){
-            if(i == 0){
-                od_log_error("ERROR: Epaper not busy after refresh command - refresh may not have started");
-                return false;
-            }
-            od_log_raw(".\n");
-            od_log_info("Refresh took %.2f seconds", (float)i / 100);
-//            delay(200);   // EXTRA DELAY HERE IS UNNEEDED AND JUST SLOWS THINGS DOWN
-            return true;
-        }
-    }
-    od_log_warn("Refresh timed out");
-    return false;
+    return waitForPanelIdle(timeout, "bb_epaper", bbepPanelBusy,
+                            "ERROR: Epaper not busy after refresh command - refresh may not have started");
 }
 
 #ifdef TARGET_ESP32
@@ -1588,8 +1634,12 @@ void initDisplay(){
             writeBootScreenWithQr();
             od_log_info("EPD refresh: FULL (boot, FastEPD)");
             touchSuspendForEpdRefresh();
+            // Same reasoning as refreshBootScreenFull(): hold the busy flag across the
+            // whole boot refresh so advertising / disconnect cleanup / deep sleep gate.
+            epdRefreshInProgress = true;
             fastepd_full_update();
             waitforrefresh(60);
+            epdRefreshInProgress = false;
             epdSessionForceOff();
             touchResumeAfterEpdRefresh();
         } else {

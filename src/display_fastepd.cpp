@@ -3,6 +3,7 @@
 #include "display_fastepd.h"
 #include "display_service.h"
 #include "structs.h"
+#include "od_log.h"
 #include <Arduino.h>
 #include <SPI.h>
 #include <string.h>
@@ -19,6 +20,7 @@ extern void it8951LoadImgAreaStart(FASTEPDSTATE* pState, uint16_t endian, uint16
 extern void it8951WriteCmdCode(FASTEPDSTATE* pState, uint16_t cmd);
 extern void it8951DisplayArea1Bit(FASTEPDSTATE* pState, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                                   uint16_t mode, uint8_t bg_gray, uint8_t fg_gray);
+extern uint16_t it8951ReadReg(FASTEPDSTATE* pState, uint16_t addr);
 
 class OdFastEPD : public FASTEPD {
 public:
@@ -225,9 +227,24 @@ void fastepd_full_update(void) {
     g_epd.backupPlane();
 }
 
-bool fastepd_wait_refresh(int timeout_sec) {
-    (void)timeout_sec;
-    return !s_init_failed;
+// Busy predicate for waitForPanelIdle() in display_service.cpp, which owns the only
+// refresh timing loop. This driver contributes the poll, not the bound.
+//
+// The IT8951 runs the update asynchronously: it8951DisplayArea1Bit() (the DU path in
+// it8951_fullscreen_du) and FastEPD's fullUpdate() both return while the panel is
+// still refreshing. There used to be no poll at all here — fastepd_wait_refresh() was
+// a stub returning immediately and waitforrefresh() short-circuits to this driver, so
+// on FastEPD panels there was no refresh wait and the 60 s cap did not exist. Callers
+// resumed seconds early and treated the panel as idle.
+//
+// LUTAFSR reads back non-zero while any LUT is active and 0 once all are done — the
+// same register the library's own it8951WaitForLUTReady() polls. Unreadable state
+// reports not-busy so the caller falls through rather than spinning to the timeout.
+bool fastepd_refresh_busy(void) {
+    if (s_init_failed) return false;
+    FASTEPDSTATE* st = g_epd.state();
+    if (!st) return false;
+    return it8951ReadReg(st, IT8951_REG_LUTAFSR) != 0;
 }
 
 void fastepd_sleep_after_refresh(void) {
