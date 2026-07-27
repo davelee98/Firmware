@@ -1326,8 +1326,14 @@ buzzer/LED and the session are all torn down immediately, since none of them tou
 Three existing mechanisms remain as backstops if the pending flag were somehow lost: the
 keep-alive deadline (`epdSessionTick`, [display_service.cpp:517-526](../src/display_service.cpp)),
 the direct-write watchdog ([main.cpp:436-442](../src/main.cpp)), and the next transfer's
-`epdSessionAcquire`. Reuse Phase 2 `[C2]`'s `panelStateUnknown` flag for reporting rather than
-adding a second one.
+`epdSessionAcquire`.
+
+> ⚠️ **Updated 2026-07-26 — Phase 2 scope cut.** This previously said "reuse Phase 2 `[C2]`'s
+> `panelStateUnknown` flag rather than adding a second one." **P2-1 was dropped, so no such flag
+> exists.** `pwrmgmLockTake()` keeps its unbounded spin and its `void` signature, and produces no
+> signal for `abortToKnownState` to report. Phase 3 must either define its own flag if it wants one,
+> or — preferably — drop panel-state reporting from `abortToKnownState`'s remit entirely, since the
+> condition it was to report can no longer be detected. The three backstops above are unaffected.
 
 **Cost:** one `volatile bool`, two set/clear pairs, one extra term in an existing condition. No
 locking, no serialization, no change to the streaming hot path.

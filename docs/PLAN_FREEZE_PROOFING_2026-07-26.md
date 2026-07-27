@@ -94,7 +94,40 @@ Reordered per review: **root cause first, owner token before anything depends on
 - **Added after implementation, in response to a live hardware failure** (`55a2478`, `77ebdcd`, `23ecaed`): a session-id mismatch now answers `RESP_AUTH_REQUIRED` rather than a fatal NACK, and **the BLE link is dropped after 10 consecutive `0xFE` answers**. The link drop is Phase 5 work pulled forward — see the Phase 5 entry below.
 - **Hard-constraint check: passes.** `git diff 02bdd5c..HEAD -- include/` is empty; no opcode or response code was added; both `RESP_AUTH_REQUIRED` and `RESP_NACK` are used in their documented meanings.
 
-### Phase 2 — Bound every unbounded wait `(was Phase 0, corrected)`
+### Phase 2 — Bound the refresh waits `(was Phase 0; scope cut 2026-07-26)`
+
+> **Scope cut — Phase 2 is now three items, not seven.** Detailed plan:
+> [`PLAN_PHASE2_BOUND_WAITS_2026-07-26.md`](PLAN_PHASE2_BOUND_WAITS_2026-07-26.md).
+>
+> **In scope:** `[X2]` `epdRefreshInProgress` on both boot paths · `[X3]` a real
+> `fastepd_wait_refresh` · a real wall-clock `waitforrefresh` deadline (P2-8, added by the Phase 2
+> plan and *not* in the original list below). Two files — `src/display_service.cpp`,
+> `src/display_fastepd.cpp`. No new file, no `src/main.cpp` change, no `platformio.ini` change.
+>
+> **Dropped, with the residual each leaves open:**
+>
+> | Dropped | Residual now carried |
+> |---|---|
+> | `[C2]` `pwrmgmLockTake` deadline | The spin stays **unbounded on both targets**. A holder that never releases blocks its waiter forever. No `panelStateUnknown` flag is produced, so **Phase 3's `abortToKnownState` has nothing to report** — drop that from its remit. |
+> | `powerOff` stuck-button bound | ESP32-only; needs a hardware fault; removes a recovery path rather than creating a freeze. |
+> | Loop-drain 2 s cap | Withdrawn as unsound, not merely descoped — see below. |
+> | `[L3]` inert TWDT flag | The dead `=120` knob stays in 9 ESP envs, still implying a watchdog that does not exist. |
+> | Loop-liveness monitor (P2-9) | **A stalled `loop()` is now undetected on both targets.** ESP32's TWDT will not fire (every long wait yields, so IDLE0 is never starved) and nRF has no watchdog at all. |
+>
+> **Consequence for Phase 6.** Phase 2 was to be the "defensive floor"; it now delivers *bounded
+> refreshes* only, not *detected stalls*. Everything in the table above lands on the supervisor —
+> and on nRF, where none of the ESP32 wall-clock watchdogs run, there is nothing between a stall and
+> Phase 6. Weigh that when sequencing Phase 6, which already had to be extended to nRF.
+>
+> **The loop-drain cap is withdrawn on the merits, not descoped.** The parent premise here — "a full
+> window of commands can hold `loop()` for minutes" — does not survive checking: 32 pipe DATA frames
+> cost 0.1–1 s total, the genuinely long case is a single END triggering a 30–60 s refresh (which a
+> between-commands check cannot interrupt), and stacked refreshes are unreachable because a second
+> `0x0072` short-circuits at [display_service.cpp:2366](../src/display_service.cpp). Do not
+> re-propose it; if a saturation signal is wanted it belongs to Phase 7's `[H1]`.
+
+**Original item list, retained for the record:**
+
 - `[C2]` **`pwrmgmLockTake` — do NOT steal.** Legitimate holds already exceed 10 s: `bbepWaitBusy` caps at **30 000 ms** for 3/4/7-colour panels (`bb_ep.inl:3959-3975`) and `epdSessionForceOffLocked` holds the lock across `bbepSleep` → `bbepWaitBusy` (`bb_ep.inl:4122`). A steal on a bare 0/1 flag with no owner means two tasks drive the same SPI/CS, the true holder's later `Give` unlocks it under the stealer (mutual exclusion permanently dead), and `pwrmgmState` ends up `PWR_ACTIVE` on a dead rail. **Instead:** `pwrmgmLockTake` returns `bool` with a **60 s** deadline (≥2× worst-case busy wait); on expiry log ERROR, return false, caller skips its panel work and sets a "panel state unknown" flag that `abortToKnownState` reports. If a forced take is ever genuinely needed, add `volatile TaskHandle_t pwrmgmOwner` so the original holder's `Give` becomes a detectable no-op.
 - `powerOff` button wait ([power_latch.cpp:87-90](../src/power_latch.cpp)): bound at 10 s, then drop the latch anyway.
 - `[X2]` Set/clear `epdRefreshInProgress` around **both boot-refresh paths** (`refreshBootScreenFull` [display_service.cpp:533-542](../src/display_service.cpp) and the FastEPD boot path at `:1588-1594`). Today a 30–60 s Spectra boot refresh is invisible to every `epdRefreshInProgress` gate — including the supervisor's "never interrupt a refresh" rule.
@@ -191,6 +224,18 @@ New `src/session_guard.h/.cpp` (both targets; ESP32 parts `#ifdef TARGET_ESP32`,
 **Note in code that deep sleep already wipes the session.** `encryptionSession` is plain `.bss` ([main.h:289](../src/main.h)), not `RTC_DATA_ATTR`, so a deep-sleep cycle destroys it regardless. Comment this so nobody later "optimises" it into RTC memory — persisting the key and `last_seen_counter` across sleeps would reintroduce the replay vector Phase 1 closes.
 
 ### Phase 6 — The 10-minute supervisor `(was Phase 6, corrected)`
+
+> ⚠️ **Phase 6 inherited work from the Phase 2 scope cut (2026-07-26).** Phase 2 no longer bounds
+> `pwrmgmLockTake`, no longer bounds `powerOff`'s stuck-button wait, and — most significantly — no
+> longer detects a stalled `loop()` on either target (the loop-liveness monitor was dropped). ESP32's
+> TWDT will not cover the gap: every long wait yields, so IDLE0 is never starved and it does not
+> fire. nRF has no watchdog at all and none of the ESP32 wall-clock watchdogs run there.
+>
+> So the supervisor is now the **first and only** thing that notices a stall, not the last line of a
+> layered defence. Two consequences for this phase: its nRF arm moves from "must not be forgotten"
+> to load-bearing, and a panel-lock holder that never releases is a fault class it must survive
+> without any upstream bound or signal.
+
 - `[C1]` **Progress means the state machine advanced — never "a command arrived" or "a notify succeeded."** After `clearEncryptionSession()`, [communication.cpp:664-670](../src/communication.cpp) answers every retry with `RESP_AUTH_REQUIRED` — a dispatch *and* a notify per retry — so dispatch/notify stamps keep `g_lastProgressMs` fresh forever and the supervisor never fires in the exact wedge it was built for. Stamp **only** at: `pipeState.expected_seq` advancing (inside the in-order accept), `directWriteBytesWritten` increasing, `chunkedWriteState.receivedChunks` incrementing, `partialCtx` byte counter advancing, refresh completion, and `handleAuthenticate` success. **Not** on command dispatch, notify, or LAN frame dispatch.
 - Wedge: `(transferActive() || chunkedWriteState.active || directWriteActive) && now - g_lastProgressMs > 600000` → if `epdRefreshInProgress`, log and retry next pass; else `abortToKnownState("supervisor", true)`.
 - `[H3]` **Keep the existing wall-clock watchdogs** ([main.cpp:436-442](../src/main.cpp), `checkPartialWriteTimeout`) as a backstop, raised to 20 min. They key on *start* stamps nothing refreshes, so they bound cases a progress predicate can't. Delete them only after hardware soak proves the progress arm fires.
