@@ -66,20 +66,34 @@ on another.
 
 | # | Item | Files | Targets | Risk |
 |---|---|---|---|---|
-| **P2-1** | `pwrmgmLockTake` → bounded, returns `bool`; add `panelStateUnknown` | `display_service.cpp/.h` | both | **Highest** — touches every panel entry point |
-| **P2-2** | `powerOff` stuck-button wait bounded at 10 s | `power_latch.cpp` | ESP32 | Low |
+| ~~P2-1~~ | ~~Bound `pwrmgmLockTake` (60 s deadline, no steal)~~ — ❌ **DROPPED** (owner decision) | — | — | — |
+| ~~P2-2~~ | ~~`powerOff` stuck-button wait bounded at 10 s~~ — ❌ **DROPPED** (owner decision) | — | — | — |
 | **P2-3** | `epdRefreshInProgress` around both boot-refresh paths | `display_service.cpp` | both | Low |
 | **P2-4** | Make `fastepd_wait_refresh` a real bounded LUT wait | `display_fastepd.cpp` | ESP32/E1004 | Medium |
 | ~~P2-5~~ | ~~Wall-clock cap on the loop command drain~~ — ❌ **DROPPED** (rationale did not survive checking; see D-F) | — | — | — |
 | **P2-6** | Delete the inert TWDT flag; document the real one | `platformio.ini`, `main.cpp` | ESP32 | None (build-flag only) |
 | **P2-7** | *(optional)* `Wire.setTimeOut(25)` — **ESP32 only, the API does not exist on nRF** | `display_service.cpp` | ESP32 | Low |
 | **P2-8** | `waitforrefresh` → wall-clock deadline, not an iteration count | `display_service.cpp` | **both (nRF-critical)** | Low |
-| **P2-9** | Loop-liveness heartbeat + monitor task | `session_monitor.cpp/.h` (new), `main.cpp` | **both** | Medium — new task |
+| ~~P2-9~~ | ~~Loop-liveness heartbeat + monitor task~~ — ❌ **DROPPED** (owner decision) | — | — | — |
 
-Suggested landing order: **P2-6 → P2-3 → P2-2 → P2-8 → P2-4 → P2-1 → P2-9**. Cheapest and least
-entangled first, so the risky ones (P2-1, P2-9) land on a branch that is otherwise already green.
-With P2-5 dropped, Phase 2 touches the `main.cpp` drain loop only for P2-9's heartbeat — no
-conflict with Phase 3's `[M5]`.
+> **Scope cut 2026-07-26 (owner decision): P2-1, P2-2 and P2-9 are DROPPED**, joining P2-5.
+> Phase 2 is now **P2-3, P2-4, P2-6, P2-8**, with P2-7 still optional. Each dropped item keeps its
+> full specification below, struck through, with its residual cost stated.
+>
+> What survives is the part that makes refreshes *bounded and visible to the supervisor*: the real
+> `waitforrefresh` deadline (P2-8), the real FastEPD wait (P2-4), `epdRefreshInProgress` covering the
+> boot paths (P2-3), and the TWDT documentation fix (P2-6). What is gone is everything that added a
+> new mechanism — the lock deadline, the button bound, and the monitor task.
+>
+> **Net effect on the phase's own thesis.** Phase 2 opened by defining a bound as binding only if it
+> (1) executes, (2) has a live timebase, and (3) is observable by a third party. With P2-9 dropped,
+> **condition 3 is satisfied by nothing on either target**, and with P2-1 dropped the panel lock
+> fails condition 1 as well. Phase 2 is now a *narrower* claim than it set out to make: it bounds
+> the refresh paths, and defers detection of a stalled `loop()` to Phase 6.
+
+Suggested landing order: **P2-6 → P2-3 → P2-8 → P2-4** (+ P2-7 if D-G flips). All four are
+low-risk and independent. Phase 2 no longer touches the `main.cpp` drain loop at all, so there is no
+conflict with Phase 3's `[M5]`, and `src/main.cpp` is touched only by P2-6's comment.
 
 ---
 
@@ -88,7 +102,12 @@ conflict with Phase 3's `[M5]`.
 The first draft of this plan was implicitly ESP32-shaped: four of the seven original items compile
 out on nRF, and the one enforcement mechanism it leaned on (the IDF task watchdog) does not exist
 there. This section states what "binding" has to mean, checks each item against it per target, and
-adds the two items (**P2-8**, **P2-9**) needed to close the nRF side.
+added the two items (**P2-8**, **P2-9**) needed to close the nRF side.
+
+> **After the scope cut, only P2-8 of those two survives.** P2-9 was the answer to condition 3, so
+> the analysis below still stands as *diagnosis* but Phase 2 no longer *treats* the third condition.
+> Read the coverage table as "what Phase 2 bounds" (P2-3, P2-4, P2-6, P2-8) plus a record of what
+> was knowingly left unbounded (P2-1, P2-2) and unobserved (P2-9).
 
 ### A bound is binding only if all three hold
 
@@ -136,12 +155,12 @@ outside `loop()` — though nothing in Phase 2 currently needs to.
 
 | Item | ESP32 | nRF | Action |
 |---|---|---|---|
-| **P2-1** lock deadline | ✅ | ✅ shared `display_service.cpp`; nRF is *why* the lock exists (Bluefruit callback task vs loop task, [:398-400](../src/display_service.cpp)) | none — already binding on both |
-| **P2-2** `powerOff` | ✅ | **n/a** — whole file is `#if defined(TARGET_ESP32)` ([power_latch.cpp:3](../src/power_latch.cpp)); nRF has no latch path and therefore no stuck-button loop | none |
+| ~~**P2-1**~~ lock deadline ❌ dropped | — | — | **left unbounded**; `pwrmgmLockTake` keeps its infinite spin on both targets |
+| ~~**P2-2**~~ `powerOff` ❌ dropped | — | **n/a** — whole file is `#if defined(TARGET_ESP32)` ([power_latch.cpp:3](../src/power_latch.cpp)); nRF has no latch path and therefore no stuck-button loop | none |
 | **P2-3** `epdRefreshInProgress` | ✅ 4 consumers | ⚠️ **flag is set but has ZERO consumers on nRF** — all four live in ESP32-only code ([ble_init.cpp:236](../src/ble_init.cpp), [main.cpp:322](../src/main.cpp), [:478](../src/main.cpp), + Phase 6) | set it anyway (correct, cheap, and Phase 6 adds the nRF consumers); **note the inertness in the commit message** |
 | **P2-4** FastEPD | ✅ | **n/a** — `OPENDISPLAY_FASTEPD` is ESP32-only (`platformio.ini:54, 84, 113, 254`) | nRF's only refresh bound is `waitforrefresh` → **P2-8** |
-| **P2-5** drain cap | ✅ | **n/a by design** — nRF has no command queue; `imageDataWritten` runs inline on the Bluefruit **callback task (prio 2)**, which *preempts* `loop()` (prio 1) | see "different failure mode" below |
-| **P2-6** TWDT flag | ✅ | **n/a** — no such flag, and no watchdog to describe | document the *absence* → **P2-9** |
+| ~~**P2-5**~~ drain cap ❌ dropped | — | **n/a by design** — nRF has no command queue; `imageDataWritten` runs inline on the Bluefruit **callback task (prio 2)**, which *preempts* `loop()` (prio 1) | see "different failure mode" below |
+| **P2-6** TWDT flag | ✅ | **n/a** — no such flag, and no watchdog to describe | document the *absence*; ~~→ P2-9~~ (dropped — the absence is now recorded and left standing) |
 | **P2-7** `Wire.setTimeOut` | ✅ default 50 ms, settable | ❌ **API absent**, and the TWIM driver busy-spins with *no* timeout (`Wire_nRF52.cpp:166-181`) | ESP32-only; the nRF gap is **D-L** |
 
 Two structural observations fall out of that table:
@@ -250,9 +269,35 @@ refresh bound from advisory to real.
 
 ---
 
-## P2-9 — Loop-liveness heartbeat + monitor task (both targets)
+## ~~P2-9~~ — Loop-liveness heartbeat + monitor task — ❌ **DROPPED**
 
-### The gap
+*Dropped 2026-07-26 by owner decision.* **Not implemented in Phase 2.** No `src/session_monitor.*`,
+no monitor task, no `loop()` heartbeat, no `LOOP_STALL_WARN_MS`. `src/main.cpp` is therefore
+**untouched by Phase 2 except for P2-6's comment**, which also removes the last point of contact
+with Phase 3's drain-loop edit.
+
+**This is the most consequential of the three drops, so be explicit about what it costs.** P2-9 was
+the only item satisfying **condition 3** — *a violation is observable by something other than the
+blocked party*. Without it:
+
+- **A stalled `loop()` is silent on both targets.** ESP32's TWDT watches IDLE0 starvation at 5 s /
+  panic, but every long wait here yields, so IDLE0 is never starved and the TWDT will not fire on
+  any fault Phase 2 was about. nRF has no watchdog at all (`NRF_WDT` is never started).
+- **nRF keeps zero out-of-`loop()` observers.** This matters more than it did when the plan was
+  written: Phase 1 demonstrated on hardware that nRF's `loop()` *is* starved mid-transfer (its
+  deferred link-drop never executed, forcing the inline disconnect in `23ecaed`). Phase 2 now
+  bounds several waits it cannot report on for that target.
+- **Combined with the P2-1 drop**, a panel-lock holder that never releases is both unbounded and
+  undetected until Phase 6.
+
+The `~2 KB` stack and the `esp32-N4` headroom question go away with it; so do D-H, D-I and D-J.
+
+The original design is retained below for the record — including the rejected alternatives (nRF
+hardware WDT, idle-hook heartbeat), which are the useful part if this is ever revived.
+
+---
+
+### The gap *(retained for the record — not implemented)*
 
 Condition (3) — *a violation is observable by someone other than the blocked party* — is unmet on
 **both** targets:
@@ -365,9 +410,34 @@ the actual signal.
 
 ---
 
-## P2-1 — Bound `pwrmgmLockTake`, do not steal
+## ~~P2-1~~ — Bound `pwrmgmLockTake`, do not steal — ❌ **DROPPED**
 
-### The rule
+*Dropped 2026-07-26 by owner decision.* **Not implemented in Phase 2.** `pwrmgmLockTake()`
+([display_service.cpp:401-408](../src/display_service.cpp)) keeps its unbounded
+`while (__atomic_exchange_n(...)) { delay(1); }` spin, unchanged. No deadline, no `bool` return, no
+`panelStateUnknown` flag, and no change to any `epdSession*` signature.
+
+**What this leaves open — state it plainly.** The parent plan lists this spin as one of its five
+unbounded waits. A holder that never releases still blocks its waiter forever. The two known
+long-but-legitimate holds remain the reason a naive bound was risky in the first place
+(`bbepWaitBusy` caps at 30 000 ms on 3/4/7-colour panels; `epdSessionForceOffLocked` holds across
+`bbepSleep` → `bbepWaitBusy`), so the residual is specifically "a hold that never *ends*", not "a
+hold that runs long". With P2-9 also dropped, **nothing in Phase 2 detects or reports that stall on
+either target** — recovery rests entirely on Phase 6's supervisor, and on nRF (where the ESP32
+wall-clock watchdogs do not run) on nothing at all until Phase 6 lands. The `[C2]` reasoning stands
+and is worth preserving:
+if anyone revisits this, **do not steal the lock** — it is a bare 0/1 flag with no owner, so a steal
+makes the true holder's later `Give` unlock it underneath the stealer, permanently destroying mutual
+exclusion on the panel's SPI/CS lines.
+
+**Knock-on: five decisions become moot** — D-A, D-A2, D-B, D-C and D-E all existed only to shape
+this item. See the Decisions section.
+
+The original specification is retained below for the record.
+
+---
+
+### The rule *(retained for the record — not implemented)*
 
 > `pwrmgmLockTake()` gets a deadline and a `bool` return. On expiry it **does not acquire**. The
 > caller skips its panel work, reports failure upward, and sets a sticky `panelStateUnknown` flag.
@@ -468,9 +538,21 @@ is. Recorded here so the option is not rediscovered from scratch.
 
 ---
 
-## P2-2 — Bound the `powerOff` stuck-button wait
+## ~~P2-2~~ — Bound the `powerOff` stuck-button wait — ❌ **DROPPED**
 
-[power_latch.cpp:85-90](../src/power_latch.cpp). Today a shorted or stuck-low button pin means the
+*Dropped 2026-07-26 by owner decision.* **Not implemented in Phase 2.**
+[power_latch.cpp:85-90](../src/power_latch.cpp) is unchanged; a stuck-low button pin still means the
+device never powers off. Narrow residual: ESP32-only (the whole file is `#if defined(TARGET_ESP32)`),
+requires a hardware fault in the button itself, and it removes a *recovery* path rather than adding a
+freeze — the device is not wedged by it, the user's last-resort power-off is simply unavailable. It
+compounds the parent plan's residual-risk note that "hold the button" is already a weak fallback
+while `loop()` is blocked.
+
+The original specification is retained below for the record.
+
+---
+
+*(retained for the record — not implemented)* Today a shorted or stuck-low button pin means the
 device never powers off — the user's last-resort recovery is gone (see the parent plan's residual-risk
 section, which already calls this out as the reason "hold the button" is a weak fallback).
 
@@ -797,10 +879,16 @@ absent. It deserves its own decision rather than being folded into an optional l
 
 ## Decisions needed
 
-Items **D-A** through **D-C** block implementation. **D-D** through **D-G** have a recommendation
-that can be taken as default.
+> **After the scope cut, nothing blocks implementation.** D-A, D-A2, D-B, D-C and D-E existed only
+> to shape P2-1; D-H, D-I and D-J only to shape P2-9. All eight are moot and struck through below,
+> retained because their analysis is the useful part if either item is ever revived.
+>
+> **Still live:** **D-D** (accept the `[X3]` downgrade — recommend yes), **D-G** (include P2-7 —
+> recommend no, defer), **D-K** (accept the nRF tick-derived `millis()` limitation — recommend yes),
+> and **D-L** (nRF I2C busy-spins with no timeout: bound it or accept it). All four have a
+> recommendation that can be taken as the default, so P2-3/P2-4/P2-6/P2-8 can start immediately.
 
-### D-A — `epdSessionAcquire` signature *(blocking)*
+### ~~D-A~~ — `epdSessionAcquire` signature — ⛔ **MOOT: P2-1 dropped**
 
 #### The problem
 
@@ -937,7 +1025,7 @@ with the guard somewhere else). **Recommend the signature change.**
 today and an early return on lock-timeout is a complete response for them (P2-1 table). Only
 `epdSessionAcquire` has a caller that must change behaviour.
 
-### D-A2 — What does the START handler NACK with? *(blocking, follows from D-A)*
+### ~~D-A2~~ — What does the START handler NACK with? — ⛔ **MOOT: P2-1 dropped**
 
 The three leaf handlers must tell the client "not started". Checked against
 `include/opendisplay_protocol.h:784-804`: **neither error namespace has a "device busy" or
@@ -955,14 +1043,14 @@ rejects a short NACK on 0x80, fall back to `OD_ERR_PIPE_START_BAD_HEADER` (0x01)
 non-poisoning: the client retries rather than disabling a feature. This is the one point where D-A
 touches the no-protocol-change constraint, so settle it before writing the handlers.
 
-### D-B — Who owns `panelStateUnknown`? *(blocking)*
+### ~~D-B~~ — Who owns `panelStateUnknown`? — ⛔ **MOOT: P2-1 dropped** (no such flag is produced)
 
 Proposed: `display_service.cpp` owns it, set only by `pwrmgmLockTake`, cleared only by a successful
 `epdSessionForceOff`. Alternative: defer the whole flag to Phase 3 and have Phase 2 only log the
 timeout. **Recommend keeping it in Phase 2** — the flag is where the knowledge is, and Phase 3
 just reads it. Confirm that a dead-until-Phase-3 flag is acceptable in review.
 
-### D-C — Does the panel become unusable after a lock timeout? — ✅ **RESOLVED: option (1), keep trying**
+### ~~D-C~~ — Does the panel become unusable after a lock timeout? — ⛔ **MOOT: P2-1 dropped** (there is no lock timeout)
 
 *Confirmed 2026-07-26.* `pwrmgmLockTake` always attempts the full 60 s take; `panelStateUnknown`
 is reported but never suppresses a retry. Aggregate cost is bounded by P2-5's drain budget and
@@ -986,7 +1074,7 @@ reimplementing it. This is a **correction to the parent plan** and should be fol
 re-litigate it. It also means the parent plan's Verification line "FastEPD refresh has no
 firmware-side bound" needs rewording.
 
-### D-E — `PWRMGM_LOCK_TIMEOUT_MS` value *(recommendation: 60 000)*
+### ~~D-E~~ — `PWRMGM_LOCK_TIMEOUT_MS` value — ⛔ **MOOT: P2-1 dropped**
 
 Derived above from `bbepWaitBusy`'s `iMaxTime = 30000`. If someone wants it tighter, the derivation
 — not the intuition — has to change. Note that a `pwrmgmLockTake` timeout is *itself* a 60 s block
@@ -1046,7 +1134,7 @@ freeze class this effort targets. But it must be recorded honestly rather than i
 If (a) is chosen, add it to the parent plan's residual-risk list, **not** to *Deliberately NOT
 changed* — it is an accepted gap, not a considered-and-rejected change.
 
-### D-H — Does P2-9 belong in Phase 2 at all? *(blocking)*
+### ~~D-H~~ — Does P2-9 belong in Phase 2 at all? — ⛔ **ANSWERED BY THE DROP: no**
 
 It is arguably Phase 6's job — it is a supervisor. The case for Phase 2: Phase 6's supervisor runs
 *inside* `loop()` and therefore cannot observe a blocked `loop()` on either target, so it is not
@@ -1058,7 +1146,7 @@ disturbing the other eight items. If it moves to Phase 6, the parent plan's Phas
 amended to say the supervisor has two arms — in-loop (state stalls) and out-of-loop (loop
 blockage) — because as written it only has the first.
 
-### D-I — Is detect-and-log enough for P2-9, or should a blocked `loop()` reboot? — ✅ **RESOLVED: log only**
+### ~~D-I~~ — detect-and-log vs reboot for P2-9 — ⛔ **MOOT: P2-9 dropped**
 
 *Confirmed 2026-07-26.* **P2-9 is detect-and-log only.** It logs an ERROR with elapsed time and
 phase breadcrumb (rate-limited to one line per 30 s), sets `g_loopStalled` for Phase 6 to report on
@@ -1164,7 +1252,7 @@ produces zero stall lines, (3) is unnecessary complexity; if it produces them, w
 breadcrumb saying where, which is worth more than a blind reset. Choosing (3) now would be building
 a recovery mechanism for a fault we have not yet observed.
 
-### D-J — `LOOP_STALL_WARN_MS` value *(recommendation: 150 000)*
+### ~~D-J~~ — `LOOP_STALL_WARN_MS` value — ⛔ **MOOT: P2-9 dropped**
 
 Derived: longest legitimate pass = `waitforrefresh(60)` = 60 s (real wall clock after P2-8) plus a
 worst-case `pwrmgmLockTake` timeout = 60 s (D-E), so 150 s clears both with margin. Note the
@@ -1185,19 +1273,19 @@ fault class we cannot recover from anyway. Add it to the parent plan's residual-
 
 | File | Items | Targets |
 |---|---|---|
-| `src/display_service.cpp` | P2-1, P2-3, P2-8, (P2-7) | both |
-| `src/display_service.h` | P2-1 (`panelStateUnknown` extern) | both |
-| `src/session_monitor.cpp/.h` *(new)* | P2-9 | both |
+| `src/display_service.cpp` | P2-3, P2-8, (P2-7) | both |
+| ~~`src/display_service.h`~~ | ~~P2-1 (`panelStateUnknown` extern)~~ — dropped | — |
+| ~~`src/session_monitor.cpp/.h`~~ *(new)* | ~~P2-9~~ — dropped, **no new file in Phase 2** | — |
 | `src/display_fastepd.cpp` | P2-4 | ESP32 |
-| `src/power_latch.cpp` | P2-2 | ESP32 |
-| `src/main.cpp` | P2-6 (comment), P2-9 (heartbeat + `sessionMonitorBegin`) — **the drain loop is untouched** | both |
+| ~~`src/power_latch.cpp`~~ | ~~P2-2~~ — dropped | — |
+| `src/main.cpp` | P2-6 (comment) only — **the drain loop is untouched** | both |
 | `platformio.ini` | P2-6 | ESP32 |
-| `docs/TIMER_AND_WATCHDOG_INVENTORY_2026-07-26.md` | P2-6, P2-9 (record nRF has no watchdog) | — |
-| `docs/PLAN_FREEZE_PROOFING_2026-07-26.md` | D-D (`[X3]` downgrade), **D-F (drop the drain cap from § Phase 2)**, D-H (Phase 6 has no out-of-loop arm), D-K (residual) | — |
+| `docs/TIMER_AND_WATCHDOG_INVENTORY_2026-07-26.md` | P2-6 (record that nRF has **no** watchdog and that Phase 2 adds none) | — |
+| `docs/PLAN_FREEZE_PROOFING_2026-07-26.md` | D-D (`[X3]` downgrade), **the scope cut: § Phase 2 must drop P2-1/P2-2/P2-5/P2-9 and move their residuals to Phase 6's remit**, D-K (residual) | — |
 
-`src/session_monitor.*` is deliberately **not** `src/session_guard.*` — that name belongs to Phase 3,
-and merging the two would make Phase 2 depend on a file it does not own. The Phase 3 plan should
-`#include "session_monitor.h"` rather than absorb it.
+~~`src/session_monitor.*` is deliberately not `src/session_guard.*`…~~ — moot with P2-9 dropped.
+**Phase 2 now creates no new file at all**, so Phase 3 owns `src/session_guard.*` with nothing to
+coordinate around and nothing to `#include`.
 
 **No protocol surface is touched.** No `CMD_*`/`RESP_*`, no frame layout, no config-packet layout,
 no client-observable behaviour change other than "a FastEPD refresh now completes before the device
@@ -1233,12 +1321,12 @@ nothing to it unless P2-8/P2-9 grow host-testable pure logic, which is worth con
 ### Static
 
 - `grep -rn "CONFIG_FREERTOS_WATCHDOG_TIMEOUT_S" platformio.ini` → no hits.
-- `grep -n "pwrmgmLockTake" src/display_service.cpp` → every call site has a `false` branch.
-- No `pwrmgmLockGive()` reachable on a path where the take returned false. Worth a manual
-  read-through; a lost `Give` here deadlocks the panel permanently.
-- `sessionMonitorHeartbeat` is called from `loop()` **outside** every `#ifdef TARGET_ESP32` — verify
-  by eye, because a heartbeat that only stamps on ESP32 makes the nRF monitor fire continuously.
-- P2-9 stack-size unit: ESP32 `xTaskCreate` takes **bytes**, nRF (vanilla FreeRTOS) takes **words**.
+- ~~`pwrmgmLockTake` call sites / lost-`Give` audit~~ — moot, P2-1 dropped; `pwrmgmLockTake()` keeps
+  its `void` signature and every existing call site is unchanged. **Confirm the diff does not touch
+  it**, which is now the check that matters.
+- ~~`sessionMonitorHeartbeat` placement, P2-9 stack-size units~~ — moot, P2-9 dropped.
+- `git diff --stat` should show **no new files** and no change to `src/main.cpp` beyond P2-6's
+  comment. If either appears, scope has crept back in.
 
 ### Hardware — both targets
 
@@ -1271,16 +1359,24 @@ plan's blanket requirement.
   the *waits we own*; `bbepWaitBusy`'s own 30 s cap and `it8951WaitForLUTReady`'s 30 s cap are the
   library's, and a hang below those (a wedged SPI transaction, a stuck DMA) is invisible to us.
   Consistent with the software-only decision.
-- **A 60 s `pwrmgmLockTake` timeout is itself a 60 s stall of whichever task hits it.** Bounded, and
-  survivable under the 5 s TWDT only because the wait yields — but it is not *fast*. If soak shows
-  this firing at all, revisit D-C option (2).
+- **`pwrmgmLockTake` is still unbounded (P2-1 dropped).** A panel-lock holder that never releases
+  blocks its waiter forever, on both targets. This is the largest residual Phase 2 knowingly leaves;
+  it was previously the item's whole reason for existing.
+- **A stalled `loop()` is undetected on both targets (P2-9 dropped).** ESP32's TWDT will not fire —
+  every long wait yields, so IDLE0 is never starved — and nRF has no watchdog at all. Phase 2 bounds
+  the refresh waits but reports nothing when a bound is exceeded by something it does not own.
+  Detection now waits for Phase 6.
+- **`powerOff`'s stuck-button wait is still unbounded (P2-2 dropped).** ESP32-only, needs a hardware
+  fault, and it removes a recovery path rather than creating a freeze.
 - **A single long command still owns `loop()` for its duration** — one 60 s refresh blocks the loop
   task for 60 s, and no drain cap can change that (the check would be between commands). This is by
   design: interrupting a refresh is worse than waiting for it. What bounds it is P2-4/P2-8, not P2-5.
 - **A saturated drain costs ~1 s of unserviced touch/buttons.** Measured-order estimate, not a
   freeze, and accepted — see D-F.
-- **P2-2 may re-latch.** A genuinely stuck-low button will power the device back on immediately
-  after the latch drops. Accepted — the alternative is a device that cannot be powered off at all.
+- **Phase 2's own thesis is only partly delivered.** Of the three conditions for a "binding" bound,
+  condition 3 (observable by a third party) is now met by nothing, and condition 1 fails for the
+  panel lock. Phase 2 delivers *bounded refreshes*; it does not deliver *detected stalls*.
+- ~~**P2-2 may re-latch.**~~ Moot — P2-2 is dropped, so the latch behaviour is unchanged from today.
 - **nRF I2C can hang forever on a bus lockup** (`Wire_nRF52.cpp:166-181`, `:230-247` — bare
   non-yielding `while(!EVENTS_x);`). Needs a physical fault (stuck SDA, bad pull-up), not a software
   condition, so it is outside the freeze class this effort targets — but `[X1]`'s "the driver gives
