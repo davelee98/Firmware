@@ -22,6 +22,19 @@
 > **All 14 findings are now addressed.** The only ones carrying no code change are `H2`
 > (recorded, deferred to a protocol revision) and `L1` (D4 demoted to latent — the fix stays).
 
+> ## ⚠ THIS PLAN HAS SHIPPED — READ ["As-built"](#as-built-what-actually-shipped) FIRST
+>
+> Everything above and below this banner is the plan **as written before implementation**. The
+> code landed on `debug/freeze-fix-phase2` (commits `0a60712`…`23ecaed`) and diverges from the
+> plan in three places, one of which is a deliberate scope expansion into Phase 5. The
+> [As-built section](#as-built-what-actually-shipped) at the end of this file is the ground
+> truth, with `file:line` anchors into the real code.
+>
+> **Nothing in Step 5's hardware list has been run.** Test 0 (the baseline that settles the D1
+> mechanism caveat) and Test 2b (whether Step 4b's silent drop actually lets py-opendisplay's
+> SACK path repair and complete an upload) are both still open. See
+> ["Unverified on hardware"](#unverified-on-hardware--the-honest-list).
+
 Phase 1 is the root-cause fix and ships first. It is self-contained: it has no dependency on any
 later phase and delivers field benefit on its own — unlike Phase 3, which is dead code until
 Phase 5/6 call it. Scope is the encryption layer (`encryption.cpp`, `encryption_state.h`, a new
@@ -697,3 +710,268 @@ Phase 1 done.
 **No `platformio.ini` change**: the bitmap is smaller than what it replaces, so the `esp32-N4`
 link headroom that gated the original proposal is not a consideration on any target.
 **No protocol-header change** (Decision E). **No client-side change.**
+
+---
+
+# As-built: what actually shipped
+
+**Written 2026-07-26 after reviewing the landed code.** Everything above this line is the plan as
+written. This section is the ground truth. Line numbers are against the tree at `23ecaed`.
+
+Commits, in order:
+
+| SHA | Subject | Corresponds to |
+|---|---|---|
+| `0a60712` | replace 512 B replay value ring with 32 B sliding bitmap | Steps 1-4, Decisions A/B/C |
+| `9b827f3` | split check from commit; stop counting packet loss as tampering | Steps 2-4 (D1/D2) |
+| `eeadbe0` | do not answer a nonce-dropped 0x0081 frame with a fatal NACK | Step 4b |
+| `44df35a` | ci: separate host-tests job | Decision D `[L5]` |
+| `23a586a` | test: host test for the nonce sliding-window state machine | Step 5 / Decision D |
+| `c87ff60` | review follow-ups (split log budgets, readable replay log, honest comments) | Step 4 logging, Decision C caveat |
+| `55a2478` | answer session-id mismatch with AUTH_REQUIRED, not a fatal NACK | **not in the plan** — field-failure response |
+| `77ebdcd` | drop the BLE link after 10 consecutive unauthenticated commands | **not in the plan** — Phase 5 work, pulled forward |
+| `23ecaed` | drop the BLE link inline on nRF; loop() is starved mid-transfer | **not in the plan** — follow-up to `77ebdcd` |
+
+## Per-step / per-decision status
+
+| Item | Status | Evidence |
+|---|---|---|
+| **Step 1** — value ring → sliding bitmap | **As specified** | `src/encryption_state.h:22-28` — `uint64_t replay_bitmap[OD_NONCE_BITMAP_WORDS]` replaces `uint64_t replay_window[64]`. `OD_NONCE_BACKWARD_BITS 256` / `OD_NONCE_BITMAP_WORDS` at `src/nonce_window.h:33,42`. No `replay_window_index`, no `has_seen_counter` anywhere (`grep` for both returns nothing), so **D3 and D4 are structurally gone**, not patched. |
+| **Step 1** — `resetNonceState()` naming all four fields `[M3]` | **As specified** | `src/encryption.cpp:123-128`, sets `nonce_counter`, `last_seen_counter`, `integrity_failures`, `memset(replay_bitmap)`. Called from both required sites: `clearEncryptionSession()` at `src/encryption.cpp:247` and `handleAuthenticate()`'s fresh-session block at `src/encryption.cpp:692`. The `[H2]`-motivated warning about `nonce_counter` is carried in the comment at `:114-122`. |
+| **Step 2** — pure `nonceCheck()` | **As specified** | `od_nonce_check()` at `src/nonce_window.h:74-82` is byte-for-byte the four ordered tests from the plan, with unsigned wrapping `fwd`/`back` at `:75-76`. The session-aware wrapper `nonceCheck()` is file-static at `src/encryption.cpp:162-188` and writes nothing to `encryptionSession` on any path. |
+| **Step 3** — `nonceCommit()` | **As specified (one structural difference)** | `od_nonce_commit()` at `src/nonce_window.h:126-145`; `od_nonce_bitmap_shift_left()` at `:87-105` handles `shift == 0` (`:88`) and `shift >= 256` (`:89-92`) explicitly. **Difference:** the plan put the wholesale-clear guard in `nonceCommit`; as built it lives inside the shift helper. Behaviourally identical and arguably better — the guard now protects *every* caller of the shift, not just the commit path. |
+| **Step 4** — `decryptCommand` rewiring | **As specified** | `src/encryption.cpp:722-800`. `nonceCheck` at `:738`; the nonce-rejection arm at `:739-755` returns false with **no** `integrity_failures` touch. `nonceCommit(nonce_counter)` at `:782` is the **first statement of the `if (success)` arm**, ahead of the malformed-`payload_length` early return — `[L2]` honoured, with the reason spelled out in the comment at `:776-781`. The tag-failure arm at `:794-798` is unchanged. |
+| **Step 4** — logging demotion + rate limit `[L7]` | **As specified, and better** | Out-of-window/replay log at `src/encryption.cpp:741-753` is `od_log_warn`, rate-limited; session-id mismatch at `:174-181` is `od_log_warn` with the two full session-ID dumps reduced to two bytes each. The plan asked for "a" rate limit; as built there are **two independent 5 s budgets** (`nonce_log_badsession_ms` / `nonce_log_window_ms`, `:137-145`) so a peer spamming session-id mismatches cannot silence the out-of-window line. Improvement over the plan. |
+| **Step 4** — delete `verifyNonceReplay()` (Decision C) | **As specified** | Gone from `src/encryption.cpp`, `src/encryption.h`, and `src/main.h`. `grep -rn "verifyNonceReplay" src/ tools/ include/` returns nothing. |
+| **Step 4b** — silent drop for nonce-rejected `0x0081` | **As specified** | `src/communication.cpp:866-868`: `if (nonce_loss && command == CMD_PIPE_WRITE_DATA) return;` where `nonce_loss` covers `NONCE_OUT_OF_WINDOW` and `NONCE_REPLAY` only. Tag failures still NACK (`:900-903`). `0x0071` deliberately untouched, documented at `:862-865`. Reason out-param plumbed through `src/encryption.h:24-28` and `src/main.h:274`. |
+| **Step 5** — host test (Decision D) | **Done** | `tools/test_nonce_window.cpp`, 702 lines. `g++ -std=c++17 -Wall -Wextra -Werror -O1 -fsanitize=undefined,address` → **PASSED 38199 checks**. Every case in Decision D's coverage list is present: `test_fresh_session` (`:161`), `test_d3_same_counter_replay` (`:190`), `test_check_is_pure` (`:241`, the memcmp purity assertion), `test_shift_edges` (`:387`), `test_wholesale_slide` (`:408`, asserting `OUT_OF_WINDOW` not `REPLAY`), `test_bit_indices_after_shift` (`:449`), `test_counter_arithmetic_extremes` (`:493`), `test_differential_against_oracle` (`:623`). |
+| **Step 5** — build gate | **Done** | `pio run` — **all 12 environments SUCCESS** (the plan and CI both said "11"; the matrix is now 12). `esp32-N4` links at 24.9% RAM / 81,468 B, i.e. **below** the 81,940 B the ring plan measured — the bitmap gave the byte budget back as predicted. |
+| **Step 5** — hardware tests 0, 1, 2, 2b, 2c, 3, 4, 4b, 5, 6 | **NOT DONE** | See ["Unverified on hardware"](#unverified-on-hardware--the-honest-list). This is the single largest gap in Phase 1. |
+| **Step 6** — comment hygiene | **As specified** | `src/communication.cpp:977-995`. Records the *mechanism* (client retransmit budget `max_retx = max(3*W, n/2)`, `blocks_per_ack` as a user-facing HA option) and explicitly calls `OD_NONCE_FORWARD_CAP` a heuristic, not an invariant — exactly what Decision A `[C1]` demanded. No number is asserted. |
+| **Decision A** — forward cap 128 | **As specified** | `src/nonce_window.h:40` — `#define OD_NONCE_FORWARD_CAP 128`, with the "this is a heuristic, the bound lives in another repo" rationale in the comment at `:35-39`. |
+| **Decision B** — shifting bitmap, `uint64_t[4]` | **As specified** | `src/nonce_window.h:33` (256 bits), `:87-105` (RFC 4303 shifting form, not RFC 6479 circular). |
+| **Decision C** — file-static, no wrapper | **As specified, with an honest correction the plan did not anticipate** | `nonceCheck`/`nonceCommit` are file-static (`src/encryption.cpp:162`, `:190`) and have no header declaration. **But** the implementation noticed and documented at `src/encryption.cpp:152-160` that Decision C's "enforced by linkage" claim is weaker than written: `encryption_state.h` must include `nonce_window.h` for `OD_NONCE_BITMAP_WORDS`, and `main.h` includes `encryption_state.h`, so the `static inline` primitive `od_nonce_commit()` is visible in **every** translation unit alongside `extern encryptionSession`. Nothing stops a determined caller from committing state directly. **Decision C as written above is therefore inaccurate and this paragraph supersedes it:** linkage enforces the rule for the session-aware wrappers; convention enforces it for the raw primitive. |
+| **Decision D** — standalone host test + separate CI job | **As specified** | `.github/workflows/main.yaml:8-27` — top-level `host-tests` job, not a step in the 11-entry matrix, with the `-fsanitize` rationale in-line. No `[env:native]`, no `test/` dir, `pio run` unaffected. |
+| **Decision E** — no wire change, `RESP_NACK` left alone | **Superseded in part by `55a2478`** | See below. Phase 1 as shipped no longer answers a session-id mismatch with `RESP_NACK`; it answers `RESP_AUTH_REQUIRED`. Still no header change and no new response code. |
+
+## Post-implementation changes — what the field failure forced
+
+The last three commits were **not** in the plan. They were added after the implementation agent
+finished, in response to a live hardware failure.
+
+### What actually happened on the bench
+
+A client lost its session mid-connection while the device still believed the session was live.
+py-opendisplay's `_direct_write_chunk_size()` keys purely on `self._session_key is not None`
+(`../py-opendisplay/src/opendisplay/device.py:1916-1929`), and `_write` picks the plaintext branch
+under the same condition (`:772-776`), so the client silently fell back to **unencrypted
+`0x0071` chunks of `CHUNK_SIZE = 230`** (`../py-opendisplay/src/opendisplay/protocol/commands.py:70`)
+— 232 bytes on the wire.
+
+232 bytes is **not** below the firmware's "unencrypted command received" length gate
+(`BLE_CMD_HEADER_SIZE + 16 + 16 = 34`, `src/communication.cpp:818`), so those frames sailed past
+the gate and into `decryptCommand`, where `nonceCheck` read 8 bytes of image data as a session id
+and returned `NONCE_BAD_SESSION`. Before Phase 1 that counted toward `integrity_failures`, and
+three of them cleared the session — ugly, but it is what made every subsequent command answer
+`0xFE`, which is what eventually made the client re-authenticate. **Phase 1's `[L7]` change
+removed that accidental recovery path** and left the device answering a fatal 3-byte `0xFF` NACK
+forever to a client that could never resolve the mismatch by retrying.
+
+**The parent plan's Context §1 narrative is wrong about this, and so is the "mechanism caveat"
+above:** the observed field wedge did not come from a forward nonce gap at all. It came from a
+session-identity divergence plus a client that degrades to plaintext instead of erroring. The
+nonce-gap story remains a genuine defect class, but it is **not** what was reproduced on hardware.
+
+### `55a2478` — session-id mismatch answers `AUTH_REQUIRED`, not `NACK`
+
+`src/communication.cpp:893-897`. On `NONCE_BAD_SESSION`, call `rejectUnauthenticated(command)`
+(3-byte `{RESP_ACK, cmd_lo, RESP_AUTH_REQUIRED}`) instead of falling through to the NACK.
+
+**Verdict: correct, and in bounds.** The client classifies a 3-byte `0xFE` as
+`AuthenticationRequiredError` (`device.py:824-827`) — a different exception hierarchy from the
+`IntegrityCheckError` raised by `0xFF` (`device.py:834-838`) — and the HA integration escalates
+`AuthenticationRequiredError` into a user-visible reauth flow rather than a silent abort. This is
+`RESP_AUTH_REQUIRED` used in exactly its documented meaning ("this command requires a live
+authenticated session"), which satisfies the parent plan's "sending an existing `RESP_*` code in a
+new situation, as long as the code's documented meaning is unchanged" allowance. No header edit.
+
+**Caveat that is not written down in the code:** py-opendisplay does **not** re-authenticate
+reactively. `_reauthenticate_if_needed` is proactive and time-based only (`device.py:788-804`),
+and the pipe send loop catches nothing but `BLETimeoutError` (`device.py:2714-2717`). So the
+in-flight upload still dies; what `55a2478` buys is the *right kind* of death — one that HA
+converts into a reauth — instead of an `IntegrityCheckError` loop with no exit. The comment at
+`src/communication.cpp:884-886` ("the client raises `AuthenticationRequiredError` and
+re-authenticates, and the mismatch clears in one round trip") **overstates this**: it clears on the
+next *connection*, not the next round trip.
+
+### `77ebdcd` — drop the BLE link after 10 consecutive unauthenticated commands
+
+`src/communication.cpp:56-201`. New `rejectUnauthenticated()` / `resetAuthGateRejects()` /
+`serviceBleAuthAbuseDisconnect()`; every `RESP_AUTH_REQUIRED` the encryption gate emits now routes
+through the counter (`src/communication.cpp:815`, `:821`, `:895`).
+
+**This crosses the plan's own scope boundary.** The Scope boundaries section above says verbatim:
+*"Do not add link-drop behaviour to `clearEncryptionSession()`. That guard is Phase 5."* The
+letter of that boundary is not violated — the drop is not in `clearEncryptionSession()`; it is
+keyed on the *symptom* (repeated `0xFE`) rather than on the *event* (session cleared). But it is
+unambiguously **the Phase 5 deliverable "make a dead session with a live link impossible", arrived
+at from the other end**, and it should be recorded as such rather than as a Phase 1 refinement.
+
+**Verdict: justified as a field-failure response, but it is scope creep and Phase 5 must now be
+re-scoped around it** (see the parent plan's Phase 5 entry, updated accordingly). It is *not*
+redundant with Phase 5: Phase 5's guard fires on the clear itself and drops the link immediately;
+this one waits for ten wasted round trips first. Phase 5 should subsume it, not duplicate it.
+
+**Three problems found in review, none of them blockers, none fixed here (documentation-only pass):**
+
+1. **The threshold is below the client's pipe window.** `AUTH_GATE_MAX_CONSECUTIVE_REJECTS = 10`
+   (`src/communication.cpp:87`), but `_send_pipe_chunks` blasts a full window of `0x0081` frames
+   before its first read (`device.py:2689-2694`) with `w_eff = max(1, min(max_queue_size,
+   dev_max_window, 32))`, **default 16**, and `_write_pipe_frame` deliberately skips re-auth for
+   the entire stream (`device.py:778-786`). So when a session dies mid-upload — precisely the
+   Phase 5 scenario — a **legitimate** client emits 16-32 gated frames back-to-back and trips the
+   guard. That is arguably the right outcome (the upload is dead either way, and a clean reconnect
+   is better than a spin), but the code's justification comment at `src/communication.cpp:70-80`
+   reasons only about a client "probing several gated commands before it authenticates" and never
+   considers the window burst. Worse, that stated justification is **not corroborated by
+   py-opendisplay**: on the normal path the client sends *zero* gated commands before
+   `CMD_AUTHENTICATE` (`device.py:652-675` — auth is the first write after connect), and `0x0044`
+   named in the comment is not a py-opendisplay opcode at all (`READ_FW_VERSION` is `0x0043`,
+   `commands.py:22`, and it bypasses the crypto wrappers entirely). The threshold of 10 is fine;
+   the reasoning recorded for it is wrong.
+2. **The count is not cleared on disconnect.** `resetAuthGateRejects()` has exactly two callers:
+   a successful decrypt (`src/communication.cpp:908`) and a successful authentication
+   (`src/encryption.cpp:691`). Neither `disconnect_callback` (`src/device_control.cpp:227-240`)
+   nor `MyBLEServerCallbacks::onDisconnect` (`src/esp32_ble_callbacks.h:57-70`) clears it. The
+   guard tries to compensate with `authGateLastHandle` (`src/communication.cpp:122-126`), but on
+   nRF `Bluefruit.connHandle()` returns the single `_conn_hdl` (`bluefruit.cpp:643-646`), which
+   is typically the *same* value for successive peripheral connections. So client A can accrue 9
+   rejections, disconnect, and client B inherit them — the exact outcome the comment at
+   `src/communication.cpp:121-123` promises cannot happen. Impact is small (B normally
+   authenticates first, which resets), and **the fix is a one-line `resetAuthGateRejects()` call
+   in each disconnect callback.** Not applied here.
+3. **On ESP32 the guard cannot identify which central offended.** `authGuardLiveConnHandle()`
+   returns `pServer->getPeerInfo(0).getConnHandle()` (`src/communication.cpp:104-112`) — peer
+   *zero*, not the sender. The NimBLE write callback discards `connInfo`
+   (`src/esp32_ble_callbacks.h:81-82`) and the command ring carries no handle, so the sender's
+   identity is genuinely unavailable by the time `imageDataWritten` runs on the loop task
+   (`src/main.cpp:415`). With `CONFIG_BT_NIMBLE_MAX_CONNECTIONS` really being 3, a second central
+   can therefore drive peer 0 — the legitimate client — off the link. This is the same missing
+   peer-binding that finding `[D3]` above already documents for `isAuthenticated()`, so it adds no
+   new capability an attacker did not have; but the guard's "drop only the link that actually
+   earned it" comment (`src/communication.cpp:186-188`) is only true on nRF. Fixing it properly
+   means widening the ESP32 command ring to carry the conn handle — a Phase 4 (connection
+   exclusivity) change, not a Phase 1 one.
+
+### `23ecaed` — drop the link inline on nRF
+
+`src/communication.cpp:145-166`: on `TARGET_NRF` only, `rejectUnauthenticated()` calls
+`serviceBleAuthAbuseDisconnect()` **inline** instead of leaving it to `loop()`.
+
+**Verdict: the inline disconnect is SAFE on nRF, and both of the commit's factual claims check
+out.** This was the highest-risk change in the branch and it survives scrutiny. The chain, verified
+against the Adafruit core in `~/.platformio/packages/framework-arduinoadafruitnrf52-seeed`:
+
+- **`loop()` really is starved.** The Arduino loop task is created at `TASK_PRIO_LOW = 1`
+  (`cores/nRF5/main.cpp:88`, `cores/nRF5/rtos.h:58`); the "Callback" task that runs the write
+  callback is `TASK_PRIO_NORMAL = 2` (`cores/nRF5/utility/AdaCallback.c:145`, `rtos.h:59`); the
+  "BLE" event task is `TASK_PRIO_HIGH = 3` (`bluefruit.cpp:473`). A sustained flood of write
+  callbacks therefore preempts `loop()` indefinitely. On top of that, the nRF `loop()` calls
+  `serviceBleAuthAbuseDisconnect()` only *after* `idleDelay(sleep_timeout_ms)`
+  (`src/main.cpp:522-531`), which can be seconds. The deferral genuinely does not work here.
+- **`Bluefruit.disconnect()` cannot unwind into the callback we are inside.** It resolves to
+  `BLEConnection::disconnect()` → `sd_ble_gap_disconnect(...)`
+  (`libraries/Bluefruit52Lib/src/BLEConnection.cpp:204-207`), which is an **asynchronous**
+  SoftDevice call: it queues the terminate and returns.
+- **The disconnect callback is queued to the same task as the write callback, so it cannot
+  preempt an in-flight command.** `BLE_GAP_EVT_DISCONNECTED` dispatches via
+  `ada_callback(NULL, 0, Periph._disconnect_cb, ...)` (`bluefruit.cpp:849`), and `ada_callback`
+  always enqueues onto the single "Callback" task queue (`AdaCallback.c:102-138`). The write
+  callback reaches the same task because `setWriteCallback(fp, useAdaCallback = true)` defaults to
+  the ada path (`BLECharacteristic.h:108`, dispatched at `BLECharacteristic.cpp:536-542`), and
+  `src/ble_init.cpp:157` uses the default. **Strict serialization through one FreeRTOS queue** is a
+  stronger safety argument than the one written in the source comment.
+- **`[H4]` does not apply.** `[H4]`'s hazard is a `memset(session_key)` landing mid-`aes_ccm_decrypt`.
+  Two independent reasons it cannot happen here: (a) nRF's `disconnect_callback`
+  (`src/device_control.cpp:227-240`) does **not** call `clearEncryptionSession()` at all — it only
+  runs `cleanupDirectWriteState`/`cleanupPartialWriteOnDisconnect`/`resetPipeWriteState`; and
+  (b) by the time the drop is requested, `decryptCommand` has already returned — the caller does
+  `rejectUnauthenticated(command); return;` — so there is no in-flight decrypt on this task
+  either. Even on the rare inline-fallback path where `ada_callback` fails on `rtos_malloc` and
+  `_wr_cb` runs on the BLE task (`BLECharacteristic.cpp:541`), the disconnect stays async and the
+  teardown still lands on the Callback task afterwards.
+- **There is prior art in this repo.** `enterDFUMode()` already calls
+  `Bluefruit.disconnect(Bluefruit.connHandle())` from command-dispatch context
+  (`src/device_control.cpp:844-848`).
+- **The 0xFE really is on the air first.** nRF's `sendResponseUnencrypted` notifies inline via
+  `imageCharacteristic.notify()` with no response ring (`src/communication.cpp:375-387`), so the
+  comment at `:154-157` is accurate.
+
+**One factual error in the code comments, which should be fixed when someone next touches the
+file.** `src/communication.cpp:171-173` claims *"the nRF disconnect callback runs synchronously
+from `Bluefruit.disconnect()`"*. It does not — `sd_ble_gap_disconnect` is async
+(`BLEConnection.cpp:206`) and the callback is queued (`bluefruit.cpp:849`). This directly
+contradicts the correct statement 13 lines earlier at `:158-160`. The *code* is right either way
+(clearing `authAbuseDisconnectPending` before the disconnect is the conservative order regardless),
+but a future reader relying on that comment would reason wrongly about re-entrancy.
+
+## Things the plan asserts that the code contradicts
+
+1. **Decision C's "enforced by linkage rather than by convention"** — half true. See the Decision C
+   row above and `src/encryption.cpp:152-160`.
+2. **Decision E's "Phase 1 leaves that exactly as it is"** — no longer true for
+   `NONCE_BAD_SESSION`, which now answers `RESP_AUTH_REQUIRED` (`src/communication.cpp:893-897`).
+3. **Step 4's `[L7]` policy statement** — "It is the right call" was written without foreseeing
+   that routing `NONCE_BAD_SESSION` to "does not count" also removes the only mechanism that ever
+   made a desynced client re-authenticate. `55a2478` restores that path deliberately. The `[L7]`
+   reasoning is still sound; it was just incomplete.
+4. **"CI builds all 11"** (Step 5) and `.github/workflows/main.yaml`'s "11-entry matrix" comment —
+   the matrix is **12** environments. Cosmetic, but wrong in three places.
+5. **The D1 mechanism caveat's framing** — the field failure that was actually reproduced was a
+   session-identity divergence, not a forward nonce gap. See "What actually happened on the bench".
+
+## Hard-constraint check — passes
+
+| Constraint | Result |
+|---|---|
+| No edit to `include/opendisplay_protocol.h` | ✅ `git diff 02bdd5c..HEAD -- include/` is empty |
+| No edit to `include/opendisplay_structs.h` | ✅ same |
+| No config-schema change | ✅ no `tools/od-device-cli.py` `BLOCKS` change needed; no struct field added/resized/reordered |
+| No new opcode or response code | ✅ `RESP_AUTH_REQUIRED` and `RESP_NACK` are both pre-existing, used in their documented meanings |
+| Nothing beyond what `docs/pipe-write-protocol.md` permits | ✅ Step 4b is conformance to §5.2; `55a2478` sends an existing code in a new situation, expressly allowed by the parent plan |
+| No Phase 5 work pulled in without acknowledgement | ❌ **`77ebdcd` pulls Phase 5's link-drop forward.** Acknowledged here and in the parent plan. |
+
+## Unverified on hardware — the honest list
+
+**Not one item of Step 5's hardware matrix has been run.** Phase 1 has been verified by
+compilation (12/12 envs) and by a host-side state-machine test (38199 checks) and by nothing else.
+Everything below is still open:
+
+- **Test 0 — baseline on unmodified firmware.** Never run. The D1 mechanism caveat above therefore
+  remains **unsettled**, and the "before/after" story for tests 1-2 still rests on an unverified
+  model. The bench failure that *was* observed (session-id divergence + plaintext fallback) is a
+  different mechanism entirely, which makes running Test 0 more important, not less.
+- **Test 2b — does Step 4b actually let the transfer complete?** ⚠ **This is the one that matters
+  most and it is completely unverified.** The entire justification for Step 4b is that silently
+  dropping a nonce-rejected `0x0081` frame lets py-opendisplay's SACK path notice the hole,
+  retransmit, and finish the upload. Nobody has watched that happen. The code path is
+  `src/communication.cpp:866-868` — three lines whose correctness is a claim about a client in
+  another repo. Reading the client supports the claim (the pipe loop blocks on ACK reads, not
+  per-frame replies) but reading is not running. **Until Test 2b passes on hardware, treat "Phase 1
+  saves the transfer" as a hypothesis and "Phase 1 saves the device" as the only supported claim.**
+- **Tests 1, 2, 2c** — forward gap within/beyond the cap, and the `blocks_per_ack = 1`, `W = 32`
+  worst case that motivated the 128 figure. Not run. `OD_NONCE_FORWARD_CAP = 128` is unvalidated
+  against a real link.
+- **Tests 3, 4, 4b** — true replay rejected; replay of the last frame of a session (D3) rejected
+  with an observable non-idempotent command; the 64× ring-flush replay (`[H3]`) that is the only
+  test distinguishing "the bitmap closed the widened hole" from "it closed the narrow one". The
+  host test covers the equivalent state-machine transitions, but not end-to-end over BLE.
+- **Test 5** — three forged tags still clear the session.
+- **Test 6** — full Spectra transfer and an E1004 ~960 KB upload complete untouched.
+- **Unlisted, added by the last two commits and therefore untested by construction:**
+  - Does the nRF inline disconnect actually drop the link mid-flood? The starvation analysis says
+    the deferred version could not, but neither version has been observed on a board.
+  - Does a legitimate client whose session dies mid-pipe-upload get dropped at 10 rejections, and
+    does HA recover cleanly from that disconnect (as opposed to from the `0xFE` it would otherwise
+    have seen)? Per the pipe-window arithmetic above this **will** happen with default settings.
+  - Does `55a2478`'s `AUTH_REQUIRED` actually drive HA's reauth flow end to end?

@@ -11,7 +11,13 @@
 
 Field failures: during PIPE_WRITE uploads from Home Assistant, lost ACKs / blind retransmits leave the device **frozen or unresponsive**. Investigation traced four wedge mechanisms plus several unbounded waits:
 
-1. **Nonce replay-window overrun** — the client burns a nonce per transmission (incl. retransmits); losing a full 32-frame window puts the next frame >32 ahead of `last_seen_counter`; 3 rejections (= client's `MAX_PTO`) trip `integrity_failures >= 3` → `clearEncryptionSession()` mid-transfer. The device then answers everything `0xFE` while `directWriteActive` keeps the panel powered 15 min. Bonus bug: `verifyNonceReplay` commits `last_seen_counter` **before** CCM tag verification ([encryption.cpp:149-155](../src/encryption.cpp)).
+1. **Nonce replay-window overrun** — the client burns a nonce per transmission (incl. retransmits); losing a full 32-frame window puts the next frame >32 ahead of `last_seen_counter`; rejections accumulate into `integrity_failures >= 3` → `clearEncryptionSession()` mid-transfer. The device then answers everything `0xFE` while `directWriteActive` keeps the panel powered 15 min. Bonus bug: `verifyNonceReplay` commits `last_seen_counter` **before** CCM tag verification ([encryption.cpp:149-155](../src/encryption.cpp)).
+
+   > **Corrected 2026-07-26 after Phase 1 shipped.** Two claims in the sentence above were wrong and are struck:
+   > - **"3 rejections (= client's `MAX_PTO`)" is a false coincidence.** `MAX_PTO = 3` yields only *two* probe sends (the client increments and raises at the threshold before sending, `device.py:2721-2726`), and the client aborts the transfer on the **first** NACK, not the third (`device.py:834-838` raises `IntegrityCheckError`, uncaught by the pipe loop at `device.py:2714-2717`). Within one transfer `integrity_failures` plausibly reaches 1, not 3. Reaching 3 needs repeated attempts on the same session.
+   > - **The freeze actually reproduced on the bench was not a forward nonce gap at all.** It was a *session-identity divergence*: the client lost its session while the device still believed one was live, and py-opendisplay silently degraded to **unencrypted 230-byte `0x0071` chunks** (`device.py:1916-1929`, `:772-776`; `commands.py:70`). At 232 bytes those frames clear the firmware's short-frame gate and enter `decryptCommand`, where 8 bytes of image data are read as a session id → `NONCE_BAD_SESSION` → fatal NACK, forever. See `PLAN_PHASE1_NONCE_REPLAY_2026-07-26.md` § "What actually happened on the bench".
+   >
+   > The nonce-gap defect class is real and Phase 1 fixed it. It is simply **not** the mechanism behind the observed field failure, and no baseline capture (Phase 1 Step 5 Test 0) has yet been taken to establish what is.
 2. **Pipe fatal-NACK latch** — `sendPipeNack` leaves `pipeState.active=true` forever ([display_service.cpp:2562-2578](../src/display_service.cpp)); `transferActive()` latches → touch dead ([touch_input.cpp:584](../src/touch_input.cpp)), WiFi roam dead; the 15-min watchdog keys on `directWriteActive`, just cleared → nothing bounds it.
 3. **Queue overflow** — response ring (10) drops newest on full ([communication.cpp:117-121](../src/communication.cpp)); command ring drops on full ([esp32_ble_callbacks.h:128](../src/esp32_ble_callbacks.h)). The **command** ring is never flushed on disconnect, so stale commands survive. *(The response ring IS drained whenever no central is connected — [main.cpp:307-312](../src/main.cpp) — so stale responses were never the wedge* `[L1]`*.)*
 4. **Cross-transport session clobber** — LAN accept/close unconditionally `clearEncryptionSession()` ([wifi_service.cpp:879, :804](../src/wifi_service.cpp)), killing a live BLE session. BLE+LAN can be connected simultaneously today.
@@ -63,13 +69,30 @@ cd ../Firmware && git diff main --stat -- include/opendisplay_protocol.h include
 Reordered per review: **root cause first, owner token before anything depends on it, supervisor before the escalations that rely on its accounting.**
 
 ### Phase 1 — Nonce/replay correctness `(was Phase 3 — highest value-per-risk, ship first)`
-[encryption.cpp](../src/encryption.cpp) / [encryption_state.h](../src/encryption_state.h)
-- Split `verifyNonceReplay` → pure `nonceCheck()` (OK / BAD_SESSION / OUT_OF_WINDOW / REPLAY, **no state writes**) + `nonceCommit(counter)` (advance `last_seen_counter` + seen-set).
-- `decryptCommand`: `nonceCheck` → nonce failures return false **without** touching `integrity_failures` (loss ≠ tampering; only a CCM tag failure is tamper evidence) → CCM decrypt → on success `nonceCommit` + reset counter; on tag failure increment (≥3 → clear session, unchanged).
-- `[M1]` Make the window **symmetric**: `OD_NONCE_WINDOW = ±128` with `replay_window[]` grown 64 → 256 ([encryption_state.h:21](../src/encryption_state.h), +1.5 KB `.bss`). An asymmetric +128/−32 lets one replayed frame jam `last_seen_counter` forward and strand the next 96 legitimate frames. **If `esp32-N4` won't link with +1.5 KB, fall back to ±64 with the existing 64-entry ring** — never forward-wider than the ring can police.
-- Move `replay_window_index` out of the function static ([encryption.cpp:152](../src/encryption.cpp)) into `encryptionSession` so `clearEncryptionSession()` resets it (real bug today).
-- **Close the `counter_diff == 0` replay hole.** The ring check is guarded by `nonce_counter <= last_seen_counter && counter_diff != 0` ([encryption.cpp:136](../src/encryption.cpp)); the `!= 0` term exists only so a fresh session's first frame (client counter 0 vs `last_seen_counter` initialised to 0) isn't flagged, but it also exempts **replay of the current highest-seen counter** from the ring entirely — the CCM tag validates because the frame is genuine, and the command re-executes. Replace the special case with an explicit `has_seen_counter` bool (or a sentinel initial value) so counter 0 is handled without exempting equality, then apply the ring check uniformly for `nonce_counter <= last_seen_counter`. Harmless for pipe DATA (duplicate seq is discarded) but not for a config write, power-off, or buzzer/LED command, which is typically what the last frame of a session is.
-- Log: distinguish `nonce out-of-window (diff=%lld) — frame dropped, session kept` from `CCM tag failure %u/3`.
+
+> ## ✅ SHIPPED 2026-07-26 — `0a60712`…`23ecaed` on `debug/freeze-fix-phase2`
+>
+> Ground truth, with `file:line` anchors, is the **"As-built"** section of
+> [`PLAN_PHASE1_NONCE_REPLAY_2026-07-26.md`](PLAN_PHASE1_NONCE_REPLAY_2026-07-26.md). The bullets
+> below are kept for provenance but **three of them describe a design that was superseded before
+> implementation** — they are struck through and corrected inline. Read the Phase 1 plan, not this
+> entry, before touching the code.
+>
+> **Verified:** 12/12 `pio run` environments build; host test `tools/test_nonce_window.cpp` passes
+> 38,199 checks under UBSan/ASan; a separate `host-tests` CI job gates every push.
+> **Not verified:** the *entire* hardware matrix, including the baseline capture (Test 0) and the
+> test that decides whether an interrupted upload actually completes (Test 2b).
+
+[encryption.cpp](../src/encryption.cpp) / [encryption_state.h](../src/encryption_state.h) / **new** [nonce_window.h](../src/nonce_window.h) / [communication.cpp](../src/communication.cpp)
+- Split `verifyNonceReplay` → pure `nonceCheck()` (OK / BAD_SESSION / OUT_OF_WINDOW / REPLAY, **no state writes**) + `nonceCommit(counter)` (advance `last_seen_counter` + seen-set). **Shipped as specified** — `verifyNonceReplay` deleted outright, `nonceCheck`/`nonceCommit` file-static, pure logic in a dependency-free `src/nonce_window.h`.
+- `decryptCommand`: `nonceCheck` → nonce failures return false **without** touching `integrity_failures` (loss ≠ tampering; only a CCM tag failure is tamper evidence) → CCM decrypt → on success `nonceCommit` + reset counter; on tag failure increment (≥3 → clear session, unchanged). **Shipped as specified.**
+- ~~`[M1]` Make the window **symmetric**: `OD_NONCE_WINDOW = ±128` with `replay_window[]` grown 64 → 256 (+1.5 KB `.bss`). If `esp32-N4` won't link, fall back to ±64.~~ **Superseded.** The value ring was replaced with an **RFC 4303 sliding bitmap**: `OD_NONCE_BACKWARD_BITS = 256` (`uint64_t[4]`, 32 B) and a separate `OD_NONCE_FORWARD_CAP = 128`. Net struct change is **−480 B**, not +1.5 KB, so **the `esp32-N4` link-headroom gate is moot** — it links at 81,468 B, *below* the pre-Phase-1 figure. `[M1]`'s jam-forward concern was withdrawn: it cannot occur once commit happens after CCM verification.
+- ~~Move `replay_window_index` out of the function static into `encryptionSession` so `clearEncryptionSession()` resets it.~~ **Superseded — the field no longer exists.** A bitmap has no insertion index, so the bug is structurally impossible rather than fixed.
+- ~~**Close the `counter_diff == 0` replay hole** … replace the special case with an explicit `has_seen_counter` bool (or a sentinel initial value).~~ **Superseded — no `has_seen_counter` was needed.** Under the bitmap, "not seen" is a clear bit rather than a reserved sentinel, so a fresh session (`last_seen = 0`, all-zero bitmap) accepts counter 0 exactly once with no exemption. The `!= 0` term is simply gone. *(Note: this hole is also wider than this bullet says — the old accept path wrote the ring unconditionally, so replaying the highest-seen frame 64× flushed every genuine entry and re-opened the whole backward window. See `[H3]` in the Phase 1 plan.)*
+- Log: distinguish `nonce out-of-window` from `CCM tag failure %u/3`. **Shipped, plus more than specified:** both nonce logs demoted to WARN and given **independent** 5 s rate-limit budgets, and the session-id-mismatch line no longer dumps two full session IDs.
+- **Added, not in this entry:** *Step 4b* — a nonce-rejected `CMD_PIPE_WRITE_DATA` (`0x0081`) frame is now answered with **silence** instead of a fatal `RESP_NACK`, so the client's SACK path can repair it. This is conformance to `docs/pipe-write-protocol.md` §5.2 ("NACKs are reserved for unrecoverable conditions … not ordinary packet loss"), not a wire change. **It is also the highest-value change in Phase 1 and the least verified** — see Test 2b.
+- **Added after implementation, in response to a live hardware failure** (`55a2478`, `77ebdcd`, `23ecaed`): a session-id mismatch now answers `RESP_AUTH_REQUIRED` rather than a fatal NACK, and **the BLE link is dropped after 10 consecutive `0xFE` answers**. The link drop is Phase 5 work pulled forward — see the Phase 5 entry below.
+- **Hard-constraint check: passes.** `git diff 02bdd5c..HEAD -- include/` is empty; no opcode or response code was added; both `RESP_AUTH_REQUIRED` and `RESP_NACK` are used in their documented meanings.
 
 ### Phase 2 — Bound every unbounded wait `(was Phase 0, corrected)`
 - `[C2]` **`pwrmgmLockTake` — do NOT steal.** Legitimate holds already exceed 10 s: `bbepWaitBusy` caps at **30 000 ms** for 3/4/7-colour panels (`bb_ep.inl:3959-3975`) and `epdSessionForceOffLocked` holds the lock across `bbepSleep` → `bbepWaitBusy` (`bb_ep.inl:4122`). A steal on a bare 0/1 flag with no owner means two tasks drive the same SPI/CS, the true holder's later `Give` unlocks it under the stealer (mutual exclusion permanently dead), and `pwrmgmState` ends up `PWR_ACTIVE` on a dead rail. **Instead:** `pwrmgmLockTake` returns `bool` with a **60 s** deadline (≥2× worst-case busy wait); on expiry log ERROR, return false, caller skips its panel work and sets a "panel state unknown" flag that `abortToKnownState` reports. If a forced take is ever genuinely needed, add `volatile TaskHandle_t pwrmgmOwner` so the original holder's `Give` becomes a detectable no-op.
@@ -115,14 +138,53 @@ New `src/session_guard.h/.cpp` (both targets; ESP32 parts `#ifdef TARGET_ESP32`,
 - **This removes a whole freeze class.** Expiry was evaluated inside `isAuthenticated()` on *every* command dispatch, so it could fire mid-transfer — deterministically wedging any upload longer than the configured timeout, since the client's proactive re-auth is skipped for the entire pipe stream. It also removes a query-with-side-effects: `isAuthenticated()` currently mutates session state as a side effect of being asked a question.
 - With expiry gone, call site 1 of `clearEncryptionSession()` disappears, and site 2 (`handleAuthenticate`'s re-auth path, [encryption.cpp:583-585](../src/encryption.cpp)) simplifies to "authenticated → clear and re-challenge", which is the correct behaviour for a client-initiated re-auth.
 
-**Make a dead session with a live link impossible.** Add the guard inside `clearEncryptionSession()` itself ([encryption.cpp:201](../src/encryption.cpp)) rather than at each call site, so future callers cannot regress it: if a client is connected and the clear was not client-initiated, raise a flag that `loop()` services by dropping the link. A cleared session under a live link is invisible to the client — it keeps sending encrypted frames that all bounce `0xFE` and never re-authenticates mid-stream — so this is the difference between a recoverable error and a wedge. Surviving call sites and their disposition:
+**Make a dead session with a live link impossible.** Add the guard inside `clearEncryptionSession()` itself ([encryption.cpp:238](../src/encryption.cpp)) rather than at each call site, so future callers cannot regress it: if a client is connected and the clear was not client-initiated, raise a flag that `loop()` services by dropping the link. A cleared session under a live link is invisible to the client — it keeps sending encrypted frames that all bounce `0xFE` and never re-authenticates mid-stream — so this is the difference between a recoverable error and a wedge. Surviving call sites and their disposition:
+
+> ### ⚠ Re-scoped: **Phase 1 already shipped a partial version of this guard** (`77ebdcd`, `23ecaed`)
+>
+> Phase 1's Scope boundaries said *"Do not add link-drop behaviour to `clearEncryptionSession()`.
+> That guard is Phase 5."* A live bench failure forced the behaviour in early anyway, from the
+> other end: `rejectUnauthenticated()` ([communication.cpp:114-166](../src/communication.cpp))
+> counts **consecutive `RESP_AUTH_REQUIRED` answers** and drops the BLE link at 10, serviced by
+> `serviceBleAuthAbuseDisconnect()` ([:168-201](../src/communication.cpp)) from `loop()` on ESP32
+> and **inline** on nRF (where `loop()` runs at `TASK_PRIO_LOW` and is starved by the
+> `TASK_PRIO_NORMAL` callback task during a flood). The counter is cleared by a successful decrypt
+> ([:908](../src/communication.cpp)) and by a successful authentication
+> ([encryption.cpp:691](../src/encryption.cpp)).
+>
+> **This does not complete Phase 5's guard — do not delete this section, and do not duplicate it
+> either.** The shipped version keys on the *symptom* and only after ten wasted round trips; Phase 5
+> keys on the *event* and drops immediately. Phase 5 must therefore:
+>
+> 1. **Subsume, not duplicate.** Land the guard inside `clearEncryptionSession()` as specified, then
+>    reduce the Phase 1 counter to a backstop for the cases the clear-site guard cannot see
+>    (a client that never had a session at all, and the `NONCE_BAD_SESSION` desync path). Do **not**
+>    leave two independent disconnect requests racing each other.
+> 2. **Fix the three defects the Phase 1 guard shipped with**, all recorded in
+>    [`PLAN_PHASE1_NONCE_REPLAY_2026-07-26.md`](PLAN_PHASE1_NONCE_REPLAY_2026-07-26.md) § `77ebdcd`:
+>    (a) the count is **not cleared on disconnect**, so a new client can inherit its predecessor's
+>    rejections — a one-line `resetAuthGateRejects()` in `disconnect_callback`
+>    ([device_control.cpp:227](../src/device_control.cpp)) and in `onDisconnect`
+>    ([esp32_ble_callbacks.h:57](../src/esp32_ble_callbacks.h)); (b) on ESP32 the guard identifies
+>    the offender as `getPeerInfo(0)` rather than the actual sender, because the command ring
+>    discards the conn handle — **fold this into Phase 4**, which is already widening connection
+>    identity; (c) the threshold of 10 is **below** py-opendisplay's default 16-frame pipe window
+>    (`device.py:2689-2694`), so a *legitimate* client whose session dies mid-upload trips it. That
+>    is probably the right outcome, but Phase 5 must decide it deliberately rather than inherit it.
+> 3. **`[H4]` is discharged for the drop path only.** Verified against the Adafruit core: the
+>    Bluefruit disconnect callback is queued via `ada_callback` onto the *same* FreeRTOS task as the
+>    write callback, and `sd_ble_gap_disconnect()` is asynchronous — so an inline
+>    `Bluefruit.disconnect()` cannot unwind into the callback it is called from. `[H4]`'s actual
+>    hazard (a `memset(session_key)` landing mid-`aes_ccm_decrypt`) is untouched and still applies
+>    to the **session clear** this section specifies, which nRF's `disconnect_callback` does not do
+>    today.
 
 | Site | Disposition |
 |---|---|
 | [encryption.cpp:585](../src/encryption.cpp) re-auth challenge | **Exempt** — client-initiated, expects a new session |
 | [encryption.cpp:670](../src/encryption.cpp) `aes_cmac` failure | Exempt — aborts a session being born |
-| [encryption.cpp:695](../src/encryption.cpp) / [:732](../src/encryption.cpp) `integrity_failures >= 3` | Must drop the link (Phase 1 removes the nonce trigger; the CCM-tag trigger remains) |
-| [communication.cpp:67](../src/communication.cpp) `reloadConfigAfterSave` | Must drop the link — a config write always arrives over a live link, and security settings may have changed |
+| ~~[encryption.cpp:695](../src/encryption.cpp) /~~ [:794-798](../src/encryption.cpp) `integrity_failures >= 3` | Must drop the link. **Phase 1 removed the nonce trigger as planned** — there is now exactly **one** call site, the CCM-tag arm; the pre-decrypt site at old `:695` no longer exists. |
+| [communication.cpp:204](../src/communication.cpp) `reloadConfigAfterSave` | Must drop the link — a config write always arrives over a live link, and security settings may have changed. *(Shifted down ~136 lines by Phase 1's auth-guard block.)* |
 | [wifi_service.cpp:804](../src/wifi_service.cpp) / [:879](../src/wifi_service.cpp) LAN | Scope to `OWNER_LAN` (Phase 4) |
 | [config_parser.cpp:883](../src/config_parser.cpp) boot load | Exempt — not connected |
 
@@ -164,7 +226,7 @@ New `src/session_guard.h/.cpp` (both targets; ESP32 parts `#ifdef TARGET_ESP32`,
 
 ## Verification
 - Session lifetime: verify a transfer longer than any legacy `session_timeout_seconds` completes untouched; verify a client-initiated re-auth mid-connection still works; verify a captured last-frame replayed after reconnect is now REJECTED (the `counter_diff == 0` hole).
-- Per phase: `pio run -e nrf52840custom -e esp32-s3-N16R8 -e esp32-c3-N16 -e esp32-c6-N4 -e esp32-N4`. CI builds all 11 on push. **`esp32-N4` is the gate** for Phase 1's `replay_window[256]` (+1.5 KB `.bss`) — it already needs `PIPE_SMALL_DRAM_WINDOW` to fit; if it won't link, drop to ±64.
+- Per phase: `pio run -e nrf52840custom -e esp32-s3-N16R8 -e esp32-c3-N16 -e esp32-c6-N4 -e esp32-N4`. CI builds all **12** on push (the matrix grew; several places in these plans still say 11). ~~**`esp32-N4` is the gate** for Phase 1's `replay_window[256]` (+1.5 KB `.bss`) — if it won't link, drop to ±64.~~ **Moot as of Phase 1:** the sliding bitmap made the struct **480 B smaller**, and `esp32-N4` links at 81,468 B / 24.9% RAM — below where it started. A `host-tests` CI job now also compiles and runs `tools/test_nonce_window.cpp` under UBSan/ASan on every push.
 - Hardware (py-opendisplay CLI): forward-gap nonce test (skip 100 counters) → session survives; true replay → rejected, session survives; kill client mid-pipe-window → reconnect, re-auth, clean push; forced pipe NACK → touch recovers ≤10 s; second BLE central → **verify on-air with a sniffer or `nRF Connect` that the refusal actually terminates** (this is the C3 trap); LAN connect during BLE session → accept-then-close; BLE connect while LAN owns → refused, telemetry still advertising; silent client 5+ min → dropped, advertising resumes, deep sleep reachable; stalled pipe with live connection **that keeps sending doomed frames** → supervisor still cleans at 10 min (this is the C1 regression test); regression: full Spectra transfer (60 s+ refresh) and an E1004 ~960 KB upload complete untouched.
 - Every recovery action logs one ERROR/WARN line with reason + counters.
 - Final soak: 24 h cron'd pushes alternating BLE/LAN with ~10% induced client kills.
@@ -183,4 +245,5 @@ Recorded so implementation does not "fix" these and review does not re-litigate 
 - A true CPU/peripheral hard hang remains detect-and-log only — accepted with the software-only decision. **But "recoverable by power cycle" is weaker than it sounds on latching devices.** The button *press* is captured by an ISR ([device_control.cpp:679-693](../src/device_control.cpp)), but the hold-duration evaluation and the power-off action run in `processButtonEvents()`, which is called **only** from `loop()`/`idleDelay()` ([main.cpp:481](../src/main.cpp), [:514](../src/main.cpp), [:527](../src/main.cpp), [:542](../src/main.cpp)) — and the power-off hold test itself is at [device_control.cpp:78](../src/device_control.cpp). So while `loop()` is blocked (e.g. inside a 60 s `waitforrefresh`, whose `delay(10)` yields to FreeRTOS but never services buttons), a long-press does not trigger power-off. On a `DEVICE_FLAG_BATTERY_LATCH` unit with no way to interrupt the rail, the user's fallback is unavailable for the duration of the block. This does not change the software-only decision, but it means the residual risk is "wait out the block or remove the battery", not "hold the button".
 - No config-schema changes (timeouts are compile-time constants in v1).
 - The client-side nonce burn (py-opendisplay) is untouched; firmware-side widening makes it safe.
-- `[M1]` A local attacker with a captured frame can still jam `last_seen_counter` forward within the window and stall a session; the supervisor is the recovery path. Symmetric windowing keeps the stall bounded by the ring.
+- ~~`[M1]` A local attacker with a captured frame can still jam `last_seen_counter` forward within the window and stall a session; the supervisor is the recovery path. Symmetric windowing keeps the stall bounded by the ring.~~ **Withdrawn — this risk does not survive Phase 1.** With commit-after-verify, only a CCM-authenticated frame advances `last_seen_counter`, so an attacker can only re-commit counters the client genuinely transmitted and can never push past the client's own high-water mark. Repairs then carry fresh, higher counters, so no future client frame falls below the window. The jam was an artifact of the value-ring design.
+- **Residual risk that replaces it:** a forward gap beyond `OD_NONCE_FORWARD_CAP = 128` is still reachable on a pathological link with `blocks_per_ack = 1` and a multi-thousand-chunk upload. Step 4b makes it non-fatal (silent drop → SACK repair) rather than impossible — **and that repair path has never been observed on hardware.**
