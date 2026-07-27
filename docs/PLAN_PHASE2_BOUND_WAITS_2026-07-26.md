@@ -1,5 +1,22 @@
 # Phase 2 Implementation Plan — Bound Every Unbounded Wait
 
+> # ⛔ OBSOLETE — SUPERSEDED
+>
+> **This plan is no longer the Phase 2 specification.** It was written for a seven-item Phase 2;
+> five of those items (P2-1, P2-2, P2-5, P2-6, P2-9) were subsequently cut, leaving a document that
+> is mostly struck-through material.
+>
+> **The current plan is
+> [`PLAN_PHASE2_REFRESH_BOUNDS_2026-07-26.md`](PLAN_PHASE2_REFRESH_BOUNDS_2026-07-26.md)** — three
+> items (P2-3, P2-8, P2-4), two files, written from scratch against the current tree.
+>
+> **Do not implement from this document.** It is retained for one reason: the analysis behind the
+> cut items is expensive to reproduce and is what stops each being re-proposed —
+> `[C2]`'s do-not-steal argument for the panel lock, P2-5's arithmetic showing a drain cap is
+> powerless, P2-9's rejected alternatives (nRF hardware WDT, idle-hook heartbeat), and the eight
+> decisions those items carried. Read it as an appendix to the current plan, not as a plan.
+
+
 **Branch:** `debug/freeze-fix-phase2` (branched from Phase 1 as-built) · **Date:** 2026-07-26
 **Parent plan:** [`PLAN_FREEZE_PROOFING_2026-07-26.md`](PLAN_FREEZE_PROOFING_2026-07-26.md) § "Phase 2"
 **Review that shaped it:** [`FINDINGS_FREEZE_PROOFING_PLAN_REVIEW_2026-07-26.md`](FINDINGS_FREEZE_PROOFING_PLAN_REVIEW_2026-07-26.md) `[C2] [X1] [X2] [X3] [L3]`

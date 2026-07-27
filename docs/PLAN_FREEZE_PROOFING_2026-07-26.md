@@ -96,8 +96,10 @@ Reordered per review: **root cause first, owner token before anything depends on
 
 ### Phase 2 — Bound the refresh waits `(was Phase 0; scope cut 2026-07-26)`
 
-> **Scope cut — Phase 2 is now three items, not seven.** Detailed plan:
-> [`PLAN_PHASE2_BOUND_WAITS_2026-07-26.md`](PLAN_PHASE2_BOUND_WAITS_2026-07-26.md).
+> **Scope cut — Phase 2 is now three items, not seven.** Current plan:
+> [`PLAN_PHASE2_REFRESH_BOUNDS_2026-07-26.md`](PLAN_PHASE2_REFRESH_BOUNDS_2026-07-26.md).
+> The earlier [`PLAN_PHASE2_BOUND_WAITS_2026-07-26.md`](PLAN_PHASE2_BOUND_WAITS_2026-07-26.md) is
+> **obsolete** — kept only for the analysis behind the cut items.
 >
 > **In scope:** `[X2]` `epdRefreshInProgress` on both boot paths · `[X3]` a real
 > `fastepd_wait_refresh` · a real wall-clock `waitforrefresh` deadline (P2-8, added by the Phase 2
