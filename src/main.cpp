@@ -9,6 +9,7 @@
 #include "touch_input.h"
 #include "encryption.h"
 #include "ble_transport.h"
+#include "diagnostics.h"
 #include "od_log.h"
 
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_LOG_UART)
@@ -85,10 +86,16 @@ void setup() {
     delay(100);
     #endif
     #endif
+    // The readiness hook keeps a dark port from being counted as dropped lines;
+    // see od_log.h. Both ports answer the question with operator bool(): DTR on
+    // USB CDC, "begin() ran" on UART -- which is exactly the distinction the
+    // logger needs and cannot make from availableForWrite() alone.
     #if defined(TARGET_ESP32) && defined(OPENDISPLAY_LOG_UART)
     od_log_init(&LogSerialPort);
+    od_log_set_ready_hook([]() -> bool { return (bool)LogSerialPort; });
     #elif !defined(DISABLE_USB_SERIAL)
     od_log_init(&Serial);
+    od_log_set_ready_hook([]() -> bool { return (bool)Serial; });
     #endif
     od_log_info("=== FIRMWARE INFO ===");
     uint8_t fwMajor = getFirmwareMajor();
@@ -444,6 +451,10 @@ static void serviceBleEvents() {
     if (ble.takeConnectedEvent()) {
         rebootFlag = 0;
         s_msdUpdatePending = true;
+        // Sampled here rather than in the stack callback: the callback contract
+        // is copy-a-flag only, and this way both targets sample at the same
+        // point in the same task.
+        diagLogHeap("connect");
         // SoftDevice PHY/DLE calls on nRF, no-op on ESP32. Deliberately here and
         // not in the connect callback: the callback contract is copy-and-flag only.
         ble.requestFastLink();
@@ -452,6 +463,9 @@ static void serviceBleEvents() {
     uint8_t rxBoundary = 0;
     if (ble.takeDisconnectedEvent(&disconnectReason, &rxBoundary)) {
         od_log_info("Disconnect reason: %u", disconnectReason);
+        // Pairs with the "connect" sample: the delta across one session is the
+        // per-session leak, which is what a slow drift over hours looks like.
+        diagLogHeap("disconnect");
         // Drop anything the departed client left in the RX ring. Without this,
         // serviceBleRx() runs BEFORE serviceBleDisconnectCleanup() in the pass, so
         // up to a full window of frames from a dead session would dispatch --
@@ -605,6 +619,12 @@ static void platformIdle() {
 // lives in the two hooks above; everything here is shared.
 void loop() {
     serviceBleEvents();
+    // Top of the pass, before anything that can block: a beat therefore means
+    // "loop() got here", and a missing beat brackets the stall to the 5 s window
+    // and to the work below. Gated on the BLE link only -- a LAN-only ESP32
+    // session stays silent, which is acceptable while the freeze under
+    // investigation is BLE-side on nRF.
+    diagHeartbeat(ble.isConnected());
     processLedFlash();
     epdSessionTick();   // millis()-poll: power the panel down screen_timeout_seconds after last release
     buzzerService();

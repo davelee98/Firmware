@@ -5,6 +5,7 @@
 #include <string.h>
 #include <Wire.h>
 #include "structs.h"
+#include "diagnostics.h"
 #include "od_log.h"
 #include "buzzer_control.h"
 #include "sensor_sht40.h"
@@ -538,6 +539,7 @@ static bool refreshBootScreenFull() {
         return false;
     }
     od_log_info("EPD refresh: FULL (boot)");
+    diagLogHeap("pre-refresh");
     touchSuspendForEpdRefresh();
     bbepRefresh(&bbep, REFRESH_FULL);
     return waitforrefresh(60);
@@ -744,7 +746,23 @@ uint8_t e1004_cs2_pin(void) {
     return p;
 }
 
+// Every panel refresh in this file ends in waitforrefresh(), across four call
+// sites with genuinely different trigger sequences (bb_epaper, FastEPD, the
+// E1004 early-exit, and the partial-update command pairs). Wrapping the tail
+// rather than consolidating the heads is what makes the post-refresh sample
+// unmissable: a new refresh path cannot be added without inheriting it, whereas
+// a helper the new path forgets to call would silently go unsampled.
+static bool waitforrefreshInner(int timeout);
+
 bool waitforrefresh(int timeout){
+    const bool ok = waitforrefreshInner(timeout);
+    // Tagged with the outcome, which also puts the refresh-timeout path in the
+    // log for the first time.
+    diagLogHeap(ok ? "post-refresh-ok" : "post-refresh-timeout");
+    return ok;
+}
+
+static bool waitforrefreshInner(int timeout){
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
     if (fastepd_driver_used()) return fastepd_wait_refresh(timeout);
 #endif
@@ -1587,6 +1605,7 @@ void initDisplay(){
         if (! (globalConfig.displays[0].transmission_modes & OD_TRANSMISSION_MODE_CLEAR_ON_BOOT)){
             writeBootScreenWithQr();
             od_log_info("EPD refresh: FULL (boot, FastEPD)");
+            diagLogHeap("pre-refresh");
             touchSuspendForEpdRefresh();
             fastepd_full_update();
             waitforrefresh(60);
@@ -2386,6 +2405,7 @@ static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t end
     // task and so never needed this, but it now shares the ring and the loop task.
     serviceBleTx();
     delay(20);
+    diagLogHeap("pre-refresh");
     epdRefreshInProgress = true;
     bool refreshSuccess = false;
     uint32_t newEtag = 0;
@@ -3206,6 +3226,7 @@ static bool partial_write_stream_bytes(uint8_t* data, uint32_t len) {
 
 static bool partial_trigger_refresh(int refreshMode) {
     if (refreshMode < 0 || refreshMode > 3) refreshMode = REFRESH_PARTIAL;
+    diagLogHeap("pre-refresh");
     if (panel_skips_reinit_on_partial_refresh(&bbep)) {
         if (panel_uses_ep397_y_decrement(&bbep)) {
             static const uint8_t u8CMDz3[4] = {0xf7, 0xd7, 0xff, 0};

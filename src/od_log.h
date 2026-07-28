@@ -31,6 +31,20 @@ void _od_log(int level, const char *fmt, ...) __attribute__((format(printf, 2, 3
 void od_log_raw(const char *fmt, ...)         __attribute__((format(printf, 1, 2)));
 void od_log_flush(void);
 
+// Writes are non-blocking: a line that does not fit the port's TX FIFO is
+// dropped and counted, never waited on. Both USB CDC implementations we log
+// over (Adafruit_USBD_CDC on nRF, HWCDC on ESP32) spin without a timeout when
+// the host stops draining, and a blocked log write blocks loop() -- fatal on
+// nRF, which has no watchdog. The count is reported on the next write that has
+// room, so a gap in the log always announces itself.
+
+// Tells the logger whether a host is listening, so a dark port is not counted as
+// dropped lines. Optional; NULL (the default) means "assume ready".
+void od_log_set_ready_hook(bool (*fn)(void));
+
+// Lines dropped since boot. For the connected-state heartbeat.
+uint32_t od_log_dropped_total(void);
+
 // Builds "<label><space-separated %02X bytes, up to 32><' ...' if truncated>" into
 // buf. Lives here rather than in one caller's translation unit because the RX line
 // (command_queue.cpp, on the stack callback task) and the TX line
