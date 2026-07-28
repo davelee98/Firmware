@@ -50,6 +50,16 @@ static uint32_t minWakeTimeMs();
 
 void setup() {
     #if defined(TARGET_ESP32) && defined(OPENDISPLAY_LOG_UART)
+    // Must precede begin(): HardwareSerial refuses to resize once the driver is
+    // installed. Without it _txBufferSize is 0, no TX ring buffer is installed,
+    // and availableForWrite() can only ever report the 128-byte hardware FIFO
+    // (SOC_UART_FIFO_LEN). od_log's room test needs up to ~210 bytes for a hex
+    // dump, so on a 128-byte ceiling every long line would time out and be
+    // dropped -- on a perfectly healthy UART, forever. A ring larger than the
+    // FIFO also makes uart_write_bytes() copy-and-return instead of blocking on
+    // the shifter, which is what keeps the ~30 KB of DEBUG output one image push
+    // emits from stalling loop() for seconds at 115200.
+    LogSerialPort.setTxBufferSize(4096);
     LogSerialPort.begin(115200, SERIAL_8N1, OPENDISPLAY_LOG_UART_RX, OPENDISPLAY_LOG_UART_TX);
     delay(100);
     #elif !defined(DISABLE_USB_SERIAL)
@@ -93,6 +103,11 @@ void setup() {
     #if defined(TARGET_ESP32) && defined(OPENDISPLAY_LOG_UART)
     od_log_init(&LogSerialPort);
     od_log_set_ready_hook([]() -> bool { return (bool)LogSerialPort; });
+    // See od_log.h: the UART cannot stall indefinitely (flow control is hardwired
+    // off in uartBegin), so waiting on it is backpressure rather than a hang risk,
+    // and the -extuart envs exist to capture complete logs. 250 ms drains ~2.8 KB
+    // at 115200 against a single line's ~18 ms.
+    od_log_set_room_wait_ms(250);
     #elif !defined(DISABLE_USB_SERIAL)
     od_log_init(&Serial);
     od_log_set_ready_hook([]() -> bool { return (bool)Serial; });

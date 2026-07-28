@@ -42,7 +42,21 @@ static uint32_t s_droppedTotal = 0;
 // back (lock, then room) cap a single line at ~40 ms against the unbounded spin
 // in Adafruit_USBD_CDC::write().
 static const uint32_t OD_LOG_LOCK_WAIT_MS = 20;
-static const uint32_t OD_LOG_ROOM_WAIT_MS = 20;
+
+// How long to wait for TX room before giving up on a line. Tunable because the
+// right answer differs by port, and by a lot:
+//
+//   USB CDC (default 20 ms) -- a stalled host never resumes on its own, so the
+//   wait is pure loss. 300 lines x a long wait would itself become a multi-second
+//   stall, which is the thing being fixed.
+//
+//   UART (250 ms, set by main.cpp) -- provably cannot stall indefinitely: uartBegin
+//   hardwires flow_ctrl = UART_HW_FLOWCTRL_DISABLE, so no external signal can stop
+//   the transmitter and the ring always drains at the baud rate. Waiting is
+//   therefore backpressure, not a hang risk, and the -extuart envs exist precisely
+//   to capture complete logs. 250 ms drains ~2.8 KB at 115200; a single ~210-byte
+//   line takes ~18 ms, so the default 20 ms would have left almost no slack.
+static uint32_t s_roomWaitMs = 20;
 
 // Longest text od_emit() will hand the port, leaving headroom inside the
 // 256-byte FIFO. Anything longer is truncated rather than dropped: a clipped
@@ -77,6 +91,10 @@ void od_log_set_ready_hook(bool (*fn)(void)) {
     s_readyHook = fn;
 }
 
+void od_log_set_room_wait_ms(uint32_t ms) {
+    s_roomWaitMs = ms;
+}
+
 uint32_t od_log_dropped_total(void) {
     return __atomic_load_n(&s_droppedTotal, __ATOMIC_RELAXED);
 }
@@ -97,7 +115,7 @@ static bool od_wait_for_room(int need) {
         if (room >= need) {
             return true;
         }
-        if ((uint32_t)(millis() - start) >= OD_LOG_ROOM_WAIT_MS) {
+        if ((uint32_t)(millis() - start) >= s_roomWaitMs) {
             return false;
         }
         delay(1);

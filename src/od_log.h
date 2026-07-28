@@ -42,6 +42,13 @@ void od_log_flush(void);
 // dropped lines. Optional; NULL (the default) means "assume ready".
 void od_log_set_ready_hook(bool (*fn)(void));
 
+// How long to wait for TX room before dropping a line. Default 20 ms, sized for
+// USB CDC where a stalled host never resumes and waiting is pure loss. A port
+// that physically cannot stall -- the log UART, whose flow control is hardwired
+// off so its ring always drains at the baud rate -- should raise this, because
+// there the wait is backpressure rather than a hang risk.
+void od_log_set_room_wait_ms(uint32_t ms);
+
 // Lines dropped since boot. For the connected-state heartbeat.
 uint32_t od_log_dropped_total(void);
 
