@@ -246,15 +246,46 @@ bool BleTransport::notify(const uint8_t* data, uint16_t len) {
     return s_imageCharacteristic.notify(data, len);
 }
 
-void BleTransport::setManufacturerData(const uint8_t* msd, uint8_t len) {
+bool BleTransport::setManufacturerData(const uint8_t* msd, uint8_t len) {
+    // Never rebuild+restart the advertisement while a BLE client is connected --
+    // the same gate ESP32 has. Bluefruit.begin(1, 0) above allocates exactly one
+    // peripheral role slot, so the start() below cannot succeed for the duration of
+    // a connection: sd_ble_gap_adv_start() returns NRF_ERROR_CONN_COUNT
+    // ("connectable advertiser cannot be started"), silently outside CFG_DEBUG.
+    //
+    // The failing call is not free. applyAdvInterval() would program the boosted
+    // 20-30 ms interval whenever a button press armed s_advBoostUntil, and tick()
+    // cannot undo that mid-connection: it bails on !isRunning() -- false for the
+    // whole connection -- AND clears its own was_boosted/s_advBoostUntil bookkeeping
+    // on the way out, so the restore is never retried. The disconnect auto re-arm
+    // then advertises at 5-33x the intended duty.
+    //
+    // Deliberately BLE-only: no LAN term. Gating on a LAN client would suppress BLE
+    // discovery from TCP accept onward -- before TLS, before any valid command, and
+    // for as long as a peer drips a byte per idle window. See
+    // docs/PLAN_NRF_NO_ADV_WHILE_CONNECTED_2026-07-29.md.
+    if (connectedCount() > 0) return false;
+    // Stop BEFORE rebuilding, not after. clearData() zeroes _count and addData()
+    // writes in place into _data -- the very buffer a previous _start() handed the
+    // SoftDevice (BLEAdvertising.cpp: gap_adv.p_data = _data). Rebuilding while the
+    // radio is live lets a scanner capture a half-updated MSD, and worse,
+    // BLE_GAP_EVT_ADV_SET_TERMINATED re-enters _start() from the stack task while
+    // this runs on the loop task.
+    //
+    // The isRunning() test is not about the fast-timeout window: disconnected,
+    // advertising is always running, because start(0) leaves _stop_timeout at 0 and
+    // the TERMINATED handler immediately re-arms slow mode. It earns its place by
+    // skipping one guaranteed-NRF_ERROR_INVALID_STATE SVC on the very first call,
+    // from startAdvertising() before any _start() has run.
+    if (Bluefruit.Advertising.isRunning()) Bluefruit.Advertising.stop();
     Bluefruit.Advertising.clearData();
     Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
     Bluefruit.Advertising.addName();
     Bluefruit.Advertising.addData(BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA, msd, len);
     applyAdvInterval();
     Bluefruit.Advertising.setFastTimeout(1);
-    Bluefruit.Advertising.stop();
     Bluefruit.Advertising.start(0);
+    return true;
 }
 
 // Proactively upgrade the link for throughput: the nRF peripheral only

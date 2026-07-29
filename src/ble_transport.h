@@ -45,7 +45,13 @@ public:
     // --- advertising payload ---
     // Pushes a new manufacturer-specific-data payload into the advertisement.
     // Each implementation keeps its own restart semantics (see the .cpp).
-    void setManufacturerData(const uint8_t* msd, uint8_t len);
+    //
+    // Returns true only when the payload was handed to the stack. False means the
+    // publish was declined -- on BOTH targets, because a client is connected and
+    // the advertiser cannot be restarted. The caller must not log the payload as
+    // published on false; nothing else needs to react, since the next call rebuilds
+    // from scratch (see updatemsdata()).
+    bool setManufacturerData(const uint8_t* msd, uint8_t len);
 
     // True where the stack re-arms advertising by itself after a disconnect
     // (nRF: Bluefruit.Advertising.restartOnDisconnect(true)). Where it is false
