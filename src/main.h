@@ -308,6 +308,33 @@ uint32_t lastActivityMs = 0;
 static constexpr uint32_t DEFAULT_IDLE_HOLD_MS = 10000;
 #endif
 
+// --- idle-path cadences (platformIdle) --------------------------------------
+// Outside the TARGET_ESP32 block above: the refresh cadence is shared, and the
+// nRF park is read on the target that block excludes.
+
+// How often the idle path republishes the manufacturer data, both targets.
+// Periodic only -- touch and button edges publish on change from their own
+// handlers -- so this covers battery/temperature drift and keeps the
+// advertisement's loop counter advancing so successive packets stay distinct.
+#ifndef OD_MSD_REFRESH_MS
+#define OD_MSD_REFRESH_MS      60000u
+#endif
+
+// How long the nRF idle path parks per loop pass. NOT
+// power_option.sleep_timeout_ms -- see platformIdle() for why that field does not
+// belong here.
+//
+// 1000 ms rather than the 500 the old zero-config branch used: now that the park
+// no longer carries the MSD cadence, nothing is lost by lengthening it. BLE work
+// is unaffected either way, because idleDelay() chunks at CHECK_INTERVAL_MS and
+// returns early on RX or a transport event. What this value actually bounds is
+// millis()-polled housekeeping -- epdSessionTick(), buzzerService(),
+// processLedFlash(), checkTransferTimeouts() -- none of which needs sub-second
+// service. Overridable per environment from platformio.ini.
+#ifndef OD_NRF_IDLE_WAIT_MS
+#define OD_NRF_IDLE_WAIT_MS    1000u
+#endif
+
 #define AXP2101_SLAVE_ADDRESS 0x34
 #define AXP2101_REG_POWER_STATUS 0x00
 #define AXP2101_REG_POWER_ON_STATUS 0x01

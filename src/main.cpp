@@ -501,6 +501,13 @@ static void serviceBleEvents() {
         // stack re-arms the radio by itself. On such a target the flag is simply
         // cleared unserviced, later in this same pass.
         s_advertisingRestartPending = true;
+        // Republish the MSD now the link is down. Mirrors the connect branch above,
+        // and matters most on nRF: setManufacturerData() declines while connected, so
+        // every state change during the session -- and any boosted advertising
+        // interval a button press armed -- waits for the next publish. Without this
+        // the wait is a full OD_MSD_REFRESH_MS cadence; with it, the next eligible
+        // pass.
+        s_msdUpdatePending = true;
     }
 }
 
@@ -578,7 +585,9 @@ static bool platformLoopPrologue() {
 }
 
 // Platform policy hook 2: what this target does when nothing is in flight.
-// ESP32 owns the deep-sleep decision; nRF just idles at its configured cadence.
+// ESP32 owns the deep-sleep decision; nRF just parks for a fixed interval
+// (OD_NRF_IDLE_WAIT_MS -- no longer sleep_timeout_ms, see the #else arm below).
+// The MSD refresh cadence after the #endif is shared by both targets.
 // Never reached while work is outstanding -- loop() handles that case itself.
 static void platformIdle() {
 #ifdef TARGET_ESP32
@@ -597,26 +606,52 @@ static void platformIdle() {
             enterDeepSleep();
         }
     } else {
-        // Non-battery (USB) idle: keep the loop responsive. A 2000 ms idle here
-        // stalls BLE command/response servicing for up to 2 s when a client
-        // connects mid-delay (the queued write waits out the delay before the
-        // loop re-evaluates), which reads as a sluggish/unreliable first
-        // exchange. Use the same short cadence as the battery idle-hold path.
+        // Non-battery (USB) idle. Same short cadence as the battery idle-hold path
+        // above, and it must stay 5 -- do NOT raise it to match nRF.
+        //
+        // It is NOT about BLE latency. idleDelay() returns early on
+        // bleRxQueuePending() || ble.eventPending(), so a connect or a queued write
+        // is picked up within one CHECK_INTERVAL_MS regardless of the value here.
+        // (The older justification, "a 2000 ms idle stalls BLE command servicing for
+        // up to 2 s", described the code before that early return existed.)
+        //
+        // What actually needs 5 ms is ESP32-only polled input:
+        //   - ADC ladder buttons: ADC_LADDER_POLL_MS 5 with ADC_LADDER_DEBOUNCE 3
+        //     needs 5 ms sampling to resolve an edge in ~15 ms. This path is a no-op
+        //     off ESP32, which is why nRF legitimately runs a slower cadence.
+        //   - GPIO tap capture: the ISR bumps press_count, but processButtonEvents()
+        //     re-reads the pin and overwrites current_state -- so a press+release
+        //     inside one interval publishes an incremented count with state=released
+        //     and the press is never observed.
+        //   - Buzzer and LED step timing are millis()-polled from this same path, so
+        //     the interval is a floor on step duration.
+        //
+        // And raising it would save nothing: CONFIG_PM_ENABLE is unset in the pinned
+        // framework (no light sleep, no tickless idle) with CONFIG_FREERTOS_HZ=1000,
+        // so the 1 kHz tick wakes the CPU whatever the delay length -- only loop-body
+        // work differs, against a radio with no modem sleep. nRF is the opposite:
+        // configUSE_TICKLESS_IDLE=1 means a longer park there really does cut
+        // wakeups. Same code shape, opposite power economics.
         idleDelay(5);
     }
+#else
+    // nRF parks for a fixed interval. Deliberately NOT sleep_timeout_ms: that field
+    // is an ESP32 deep-sleep wake window ("nominal awake/advertising time before
+    // sleep") and nRF has no deep sleep, so binding to it made one provisioned value
+    // govern two unrelated behaviours -- the park length AND the MSD refresh cadence
+    // -- and disabled the refresh outright when it was 0, which is reachable both
+    // from a factory-fresh device and from any failed config load.
+    idleDelay(OD_NRF_IDLE_WAIT_MS);
+#endif
+    // Shared by both targets as of this change: the MSD refresh is a cadence, not a
+    // side effect of how long the idle path happens to park. Periodic only -- touch
+    // and button edges publish on change from their own handlers -- so this covers
+    // battery/temperature drift and keeps the advertisement's loop counter moving.
     static uint32_t lastMsdUpdate = 0;
-    if (millis() - lastMsdUpdate >= 60000) {
+    if (millis() - lastMsdUpdate >= OD_MSD_REFRESH_MS) {
         lastMsdUpdate = millis();
         updatemsdata();
     }
-#else
-    if (globalConfig.power_option.sleep_timeout_ms > 0) {
-        idleDelay(globalConfig.power_option.sleep_timeout_ms);
-        updatemsdata();
-    } else {
-        idleDelay(500);
-    }
-#endif
 }
 
 // One loop body for both targets. The per-target policy that genuinely differs
@@ -636,8 +671,20 @@ void loop() {
     serviceBleTx();
     serviceBleDisconnectCleanup();
     if (s_msdUpdatePending) {
-        s_msdUpdatePending = false;
+        // Runs even while connected, deliberately: updatemsdata() refreshes
+        // msd_payload, which handleReadMSD() serves over GATT/LAN by reading the
+        // global -- and that is the connect-raised flag's whole purpose, since only
+        // the advertisement publish inside setManufacturerData() is gated on the
+        // link. Skipping the call outright would hand a connected client stale bytes
+        // from before its own session.
         updatemsdata();
+        // But keep the flag raised while the publish cannot land. serviceBleEvents()
+        // takes connect and disconnect in SEQUENTIAL ifs, not else-if, so one pass
+        // can service a disconnect AND a reconnect -- the interleaving the disconnect
+        // branch documents for a ~16 s EPD refresh. Clearing unconditionally would
+        // spend the flag on a gated publish and lose the post-session republish,
+        // including the advertising-interval restore it exists to trigger.
+        s_msdUpdatePending = ble.isConnected();
     }
     serviceBleAdvertisingRestart();   // no-op where the stack re-arms itself
 
