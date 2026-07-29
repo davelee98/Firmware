@@ -1836,16 +1836,28 @@ void updatemsdata(){
     // The only record of what actually reaches the air. Without it, "the button
     // event is logged but the host never sees it" cannot be split into a firmware
     // publish failure vs a host-side one without a BLE sniffer.
-    {
+    //
+    // Emitted AFTER the call and only when the transport accepted the payload. It
+    // used to run before it, so it claimed a publish for every update the gate
+    // declined -- on ESP32 always, and on nRF as of the connected-gate change. A
+    // record of what reached the air is worthless if it also logs what did not.
+    if (ble.setManufacturerData(msd_payload, 16)) {
         char line[96];
         od_log_hex_line(line, sizeof(line), "MSD publish: ", msd_payload, 16);
         od_log_debug("%s", line);
     }
-    ble.setManufacturerData(msd_payload, 16);
 #ifdef OPENDISPLAY_HAS_WIFI
+    // Deliberately NOT gated on the publish above: the mDNS TXT record is the
+    // LAN-side state channel, and a BLE client being connected must not stop a LAN
+    // host from seeing fresh state.
     // (Implies TARGET_ESP32; the enclosing target guard is gone with the split.)
     opendisplay_mdns_update_msd_txt();
 #endif
+    // Also unconditional. The counter lives in the status byte -- msd_payload[15],
+    // bits 4-7 -- so it is what makes successive advertisements distinguishable and
+    // what guarantees the next call differs from prev_msd_payload above. Stalling it
+    // on a declined publish would freeze the payload and turn the change test into a
+    // permanent skip.
     mloopcounter++;
     mloopcounter &= 0x0F;
 }

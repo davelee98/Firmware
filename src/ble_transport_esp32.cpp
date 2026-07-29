@@ -276,7 +276,7 @@ bool BleTransport::notify(const uint8_t* data, uint16_t len) {
     return s_txCharacteristic->notify(data, len);
 }
 
-void BleTransport::setManufacturerData(const uint8_t* msd, uint8_t len) {
+bool BleTransport::setManufacturerData(const uint8_t* msd, uint8_t len) {
     s_advertisementData.setManufacturerData(msd, len);
     BLEAdvertising* pAdvertising = (s_server != nullptr) ? s_server->getAdvertising()
                                                          : BLEDevice::getAdvertising();
@@ -284,7 +284,9 @@ void BleTransport::setManufacturerData(const uint8_t* msd, uint8_t len) {
         // Only rebuild+restart advertising while disconnected. The former
         // connected branch rebuilt the advertisement data but never pushed it via
         // setAdvertisementData(), so it was dead work -- dropped.
-        return;
+        //
+        // false: nothing reached the stack, so the caller must not log a publish.
+        return false;
     }
     pAdvertising->stop();
     BLEAdvertisementData fresh;
@@ -300,6 +302,7 @@ void BleTransport::setManufacturerData(const uint8_t* msd, uint8_t len) {
     pAdvertising->setAdvertisementData(fresh);
     delay(50);
     pAdvertising->start();
+    return true;
 }
 
 // Match nRF's link tuning: 2M PHY + 251-octet DLE. Like nRF, the peripheral only
