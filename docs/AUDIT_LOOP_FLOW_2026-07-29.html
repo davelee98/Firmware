@@ -1,0 +1,1075 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  OpenDisplay Firmware - loop() and application control-flow audit.
+  Standalone copy of the artifact published 2026-07-29 from branch
+  fix/loop-hang-watchdog-and-nonblocking-log @ 1fc524b.
+
+  Diagrams are Mermaid. The module below is loaded from a CDN, so with no
+  network the five <pre class="mermaid"> blocks render as their plain diagram
+  source instead - degraded but still readable. Everything else is self-contained.
+-->
+<style>
+  /* minimal reset (the artifact host supplies one; this replaces it) */
+  *, *::before, *::after { box-sizing: border-box; }
+  body { margin: 0; }
+  img, svg { max-width: 100%; }
+  pre { margin: 0; }
+</style>
+<title>OpenDisplay Firmware — loop() and application flow</title>
+<style>
+  :root {
+    --paper:       #F1F4F7;
+    --surface:     #FBFCFD;
+    --ink:         #131A22;
+    --ink-2:       #46545F;
+    --ink-3:       #6C7B87;
+    --rule:        #C7D1DA;
+    --rule-soft:   #DFE6EC;
+    --plate:       #EDF1F4;
+    --plate-edge:  #C7D1DA;
+
+    --ble:   #2E6FA8;
+    --lan:   #6B4FB8;
+    --epd:   #A96C12;
+    --haz:   #B03A2A;
+    --per:   #22755A;
+
+    --ble-wash: #E4EDF6;
+    --lan-wash: #EBE6F7;
+    --epd-wash: #F6EDDD;
+    --haz-wash: #F7E5E1;
+    --per-wash: #E1F0EA;
+
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+
+    --measure: 68ch;
+    --wide: 1120px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper:      #0E141A;
+      --surface:    #151D25;
+      --ink:        #DCE4EB;
+      --ink-2:      #9FAEBA;
+      --ink-3:      #74848F;
+      --rule:       #2A3742;
+      --rule-soft:  #1F2A33;
+      --plate:      #E6EAEE;
+      --plate-edge: #35424D;
+
+      --ble:  #79B0E0;
+      --lan:  #AE95EE;
+      --epd:  #DFAA55;
+      --haz:  #E8796A;
+      --per:  #5FBE99;
+
+      --ble-wash: #17293A;
+      --lan-wash: #241E3C;
+      --epd-wash: #33290F;
+      --haz-wash: #341A16;
+      --per-wash: #133026;
+    }
+  }
+
+  :root[data-theme="light"] {
+    --paper:#F1F4F7; --surface:#FBFCFD; --ink:#131A22; --ink-2:#46545F; --ink-3:#6C7B87;
+    --rule:#C7D1DA; --rule-soft:#DFE6EC; --plate:#EDF1F4; --plate-edge:#C7D1DA;
+    --ble:#2E6FA8; --lan:#6B4FB8; --epd:#A96C12; --haz:#B03A2A; --per:#22755A;
+    --ble-wash:#E4EDF6; --lan-wash:#EBE6F7; --epd-wash:#F6EDDD; --haz-wash:#F7E5E1; --per-wash:#E1F0EA;
+  }
+  :root[data-theme="dark"] {
+    --paper:#0E141A; --surface:#151D25; --ink:#DCE4EB; --ink-2:#9FAEBA; --ink-3:#74848F;
+    --rule:#2A3742; --rule-soft:#1F2A33; --plate:#E6EAEE; --plate-edge:#35424D;
+    --ble:#79B0E0; --lan:#AE95EE; --epd:#DFAA55; --haz:#E8796A; --per:#5FBE99;
+    --ble-wash:#17293A; --lan-wash:#241E3C; --epd-wash:#33290F; --haz-wash:#341A16; --per-wash:#133026;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 17px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: var(--wide);
+    margin: 0 auto;
+    padding: 0 28px 120px;
+  }
+
+  /* ---------- masthead ---------- */
+
+  .mast {
+    border-bottom: 2px solid var(--ink);
+    padding: 56px 0 20px;
+    margin-bottom: 48px;
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin: 0 0 18px;
+  }
+  h1 {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: clamp(26px, 4vw, 40px);
+    line-height: 1.14;
+    letter-spacing: -0.015em;
+    margin: 0 0 18px;
+    text-wrap: balance;
+    max-width: 22ch;
+  }
+  .standfirst {
+    max-width: var(--measure);
+    color: var(--ink-2);
+    font-size: 18px;
+    margin: 0 0 24px;
+  }
+  .mast-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 28px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.05em;
+    color: var(--ink-3);
+    padding-top: 12px;
+    border-top: 1px solid var(--rule-soft);
+  }
+  .mast-meta b { color: var(--ink-2); font-weight: 500; }
+
+  /* ---------- sections ---------- */
+
+  section { margin: 0 0 76px; }
+
+  h2 {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink);
+    margin: 0 0 6px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--rule);
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+  }
+  h2 .num {
+    color: var(--ink-3);
+    font-weight: 400;
+    font-variant-numeric: tabular-nums;
+  }
+  h2 + .lede {
+    max-width: var(--measure);
+    color: var(--ink-2);
+    margin: 18px 0 0;
+  }
+
+  h3 {
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    margin: 40px 0 12px;
+    color: var(--ink);
+  }
+  h4 {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin: 30px 0 10px;
+  }
+
+  p { max-width: var(--measure); margin: 16px 0; }
+  ul, ol { max-width: var(--measure); padding-left: 20px; margin: 16px 0; }
+  li { margin: 7px 0; }
+
+  code, .m {
+    font-family: var(--mono);
+    font-size: 0.86em;
+    background: var(--rule-soft);
+    padding: 1px 5px;
+    border-radius: 2px;
+    word-break: break-word;
+  }
+  .src {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-3);
+    background: none;
+    padding: 0;
+    white-space: nowrap;
+  }
+
+  /* ---------- plates (diagrams) ---------- */
+
+  .plate {
+    background: var(--plate);
+    border: 1px solid var(--plate-edge);
+    border-radius: 3px;
+    margin: 28px 0;
+    overflow: hidden;
+  }
+  .plate-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--plate-edge);
+    background: rgba(0,0,0,0.025);
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: #46545F;
+  }
+  .plate-head .fig { font-weight: 600; color: #131A22; }
+  .plate-body {
+    overflow-x: auto;
+    padding: 22px 16px;
+  }
+  .plate-body .mermaid { min-width: 460px; }
+  .plate-note {
+    padding: 0 16px 16px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: #46545F;
+    max-width: 92ch;
+  }
+
+  /* ---------- tables ---------- */
+
+  .tablewrap {
+    overflow-x: auto;
+    margin: 24px 0;
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    background: var(--surface);
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 720px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  thead th {
+    text-align: left;
+    font-weight: 600;
+    font-size: 10.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    padding: 11px 13px;
+    border-bottom: 1px solid var(--rule);
+    white-space: nowrap;
+    vertical-align: bottom;
+  }
+  tbody td {
+    padding: 11px 13px;
+    border-bottom: 1px solid var(--rule-soft);
+    vertical-align: top;
+    color: var(--ink-2);
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody td:first-child { color: var(--ink); }
+  td.step {
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-3) !important;
+    width: 1%;
+    padding-right: 4px;
+  }
+  td.num, th.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  /* channel chips */
+  .chip {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 2px;
+    white-space: nowrap;
+    font-weight: 600;
+  }
+  .c-ble { color: var(--ble); background: var(--ble-wash); }
+  .c-lan { color: var(--lan); background: var(--lan-wash); }
+  .c-epd { color: var(--epd); background: var(--epd-wash); }
+  .c-haz { color: var(--haz); background: var(--haz-wash); }
+  .c-per { color: var(--per); background: var(--per-wash); }
+  .c-off { color: var(--ink-3); background: var(--rule-soft); }
+
+  /* ---------- callouts ---------- */
+
+  .note {
+    border-left: 3px solid var(--rule);
+    padding: 2px 0 2px 18px;
+    margin: 24px 0;
+    max-width: var(--measure);
+    color: var(--ink-2);
+  }
+  .note.haz { border-color: var(--haz); }
+  .note.epd { border-color: var(--epd); }
+  .note.ble { border-color: var(--ble); }
+  .note strong { color: var(--ink); font-family: var(--mono); font-size: 0.86em; letter-spacing: 0.04em; }
+
+  /* legend */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 18px;
+    margin: 20px 0 0;
+    padding: 14px 0 0;
+    border-top: 1px solid var(--rule-soft);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-3);
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .legend i {
+    width: 11px; height: 11px; border-radius: 2px; display: inline-block;
+    border: 1px solid rgba(0,0,0,0.18);
+  }
+
+  /* two-up */
+  .duo {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 26px;
+    margin: 26px 0;
+  }
+  .duo > div { min-width: 0; }
+  .duo h4 { margin-top: 0; }
+  .duo ul { max-width: none; }
+
+  footer {
+    border-top: 1px solid var(--rule);
+    padding-top: 22px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-3);
+    line-height: 1.75;
+  }
+  footer p { max-width: 88ch; }
+
+  a { color: var(--ble); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, :focus-visible { outline: 2px solid var(--ble); outline-offset: 2px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <header class="mast">
+    <p class="eyebrow">OpenDisplay · Firmware (nRF52840 / ESP32) · control-flow audit</p>
+    <h1>What happens in loop(), and where it stops happening</h1>
+    <p class="standfirst">A traced map of the main loop and the surrounding application flow — boot, BLE, LAN, panel and peripheral servicing — with every point where <code>loop()</code> blocks, spins, or is starved located and bounded from source.</p>
+    <div class="mast-meta">
+      <span><b>Branch</b> fix/loop-hang-watchdog-and-nonblocking-log</span>
+      <span><b>Head</b> 1fc524b</span>
+      <span><b>Scope</b> report only — no code changed</span>
+      <span><b>Method</b> read from source; no speculation</span>
+    </div>
+  </header>
+
+  <!-- ============================================================= -->
+  <section>
+    <h2><span class="num">01</span> Execution model</h2>
+    <p class="lede">Both targets are Arduino-on-FreeRTOS, and on both, <code>loop()</code> is a task among others rather than the whole program. The task rank differs, and it is the single most important asymmetry in this document.</p>
+
+    <p>Since the Phase 3 transport unification, the callback contract is symmetric on both targets: a BLE stack callback may do exactly two things — copy bytes into the RX ring and set a flag. Everything else (command dispatch, zlib inflate, EPD SPI streaming, notify, connect/disconnect application work, the PHY/DLE request) runs on the loop task. <span class="src">ble_transport_nrf.cpp:118-124, ble_transport_esp32.cpp:79-81</span></p>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Context</th><th>nRF52840</th><th>ESP32 (S3 / C3 / C6 / classic)</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>loop task</td>
+            <td><code>"loop"</code>, <code>TASK_PRIO_LOW</code> = 1 <span class="src">core nRF5/main.cpp:88</span></td>
+            <td><code>"loopTask"</code>, priority 1, on <code>ARDUINO_RUNNING_CORE</code> <span class="src">core esp32/main.cpp:113</span></td>
+          </tr>
+          <tr>
+            <td>Stack event task</td>
+            <td><code>"BLE"</code> + <code>"SOC"</code>, <code>TASK_PRIO_HIGH</code> = 3 <span class="src">bluefruit.cpp:473,480</span></td>
+            <td>NimBLE host task (stack-owned)</td>
+          </tr>
+          <tr>
+            <td>App callback task</td>
+            <td><code>"Callback"</code>, <code>TASK_PRIO_NORMAL</code> = 2 — connect, disconnect <em>and</em> characteristic-write callbacks are dispatched here via <code>ada_callback</code> <span class="src">AdaCallback.c:147, bluefruit.cpp:829,849, BLECharacteristic.cpp:539</span></td>
+            <td>Same NimBLE host task as above</td>
+          </tr>
+          <tr>
+            <td>Third context</td>
+            <td><code>SoftwareTimer</code> one-shot on the FreeRTOS timer task, armed on connect, fires ~2.5 s later. Log-only by design. <span class="src">ble_transport_nrf.cpp:95-116</span></td>
+            <td>WiFi/LAN driver + event tasks (events are deferred to loop via flags) <span class="src">wifi_service.cpp:480-488, 649</span></td>
+          </tr>
+          <tr>
+            <td>loop() rank</td>
+            <td><span class="chip c-haz">lowest non-idle</span> — below both the callback task and the BLE tasks</td>
+            <td>Priority 1, one above idle</td>
+          </tr>
+          <tr>
+            <td>Loop watchdog</td>
+            <td><span class="chip c-haz">none</span> <span class="src">od_log.cpp:129</span></td>
+            <td><span class="chip c-haz">not armed</span> — <code>loopTaskWDTEnabled = false</code> in <code>app_main()</code> and the firmware never calls <code>enableLoopWDT()</code> <span class="src">core esp32/main.cpp:111; no match in src/</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note haz">
+      <strong>Consequence.</strong> There is no watchdog backstop on either target. Every bound listed in this document is a bound the code imposes on itself; if one is exceeded the device stays in that state until power is cycled. On ESP32 every environment defines <code>-DCONFIG_FREERTOS_WATCHDOG_TIMEOUT_S=120</code> in <code>build_flags</code>, but the loop task's own WDT subscription is separately gated on <code>loopTaskWDTEnabled</code>, which is false at boot and never set.
+    </div>
+
+    <div class="note">
+      <strong>nRF starvation is structural.</strong> Because the loop task sits below both the callback task (2) and the BLE/SOC tasks (3), sustained BLE traffic can starve <code>loop()</code> with no single blocking call responsible. The heartbeat exists precisely to tell that apart from a blocked loop: a beat arriving with <code>loops</code> in the thousands is a healthy idle link, a beat with <code>loops</code> near zero is a starved loop, no beat at all is a blocked one. <span class="src">diagnostics.cpp:85-124</span>
+    </div>
+  </section>
+
+  <!-- ============================================================= -->
+  <section>
+    <h2><span class="num">02</span> Boot — setup()</h2>
+    <p class="lede">One <code>setup()</code>, two orderings. nRF must bring the SoftDevice up <em>before</em> display/SPI and advertise only after the boot screen; ESP32 initialises BLE <em>after</em> the display because it queues commands for <code>loop()</code> until setup returns.</p>
+
+    <div class="plate">
+      <div class="plate-head"><span class="fig">Fig. 1 — setup() to first loop pass</span><span>main.cpp:51-273</span></div>
+      <div class="plate-body">
+<pre class="mermaid">
+%%{init: {'theme':'neutral','flowchart':{'curve':'linear','nodeSpacing':28,'rankSpacing':34}}}%%
+flowchart TD
+  B0(["reset / wake"]) --> B1["log port up: Serial or UART1<br/>od_log_init + ready hook<br/>main.cpp:52-114"]
+  B1 --> B2{"TARGET_ESP32?"}
+  B2 -- yes --> B3["esp_reset_reason + esp_sleep_get_wakeup_cause<br/>is_deep_sleep_wake / woke_by_button<br/>main.cpp:133-155"]
+  B2 -- no --> B4["no wake concept<br/>is_deep_sleep_wake = false"]
+  B3 --> B5
+  B4 --> B5["full_config_init<br/>LittleFS, config load, factory embed,<br/>xiaoinit / ws_pp_init, powerLatchBegin<br/>config_parser.cpp:860"]
+  B5 --> B6["od_tls_reserve_records<br/>ESP32+WiFi only, heap still contiguous<br/>main.cpp:167-175"]
+  B6 --> B7["initio<br/>LEDs, buzzers, pwr_pin, data buses, sensors<br/>display_service.cpp:959"]
+  B7 --> B8{"target"}
+  B8 -- nRF --> B9["ble.begin - SoftDevice up BEFORE SPI<br/>main.cpp:186-202"]
+  B8 -- ESP32 --> B10["deferred"]
+  B9 --> B11
+  B10 --> B11{"deep-sleep wake?"}
+  B11 -- "no (incl. panic/WDT/SW reset)" --> B12["rebootFlag = 1<br/>initDisplay: rail up, panel init,<br/>boot screen + FULL refresh, force off<br/>display_service.cpp:1585"]
+  B11 -- yes --> B13["skip initDisplay<br/>panel keeps its image = the wake saving"]
+  B12 --> B14
+  B13 --> B14{"target"}
+  B14 -- ESP32 --> B15["ble.begin + updatemsdata + startAdvertising<br/>main.cpp:214-229"]
+  B14 -- nRF --> B16["ble.startAdvertising<br/>restartOnDisconnect(true)"]
+  B15 --> B17
+  B16 --> B17["initWiFi(false) if not a wake<br/>updatemsdata, initButtons, initTouchInput"]
+  B17 --> B18{"ESP32 wake?"}
+  B18 -- yes --> B19["arm advertising window LAST<br/>advertising_timeout_active = true<br/>button wake also arms min-wake hold<br/>main.cpp:243-268"]
+  B18 -- no --> B20["first boot: arm min-wake hold<br/>lastActivityMs = millis()"]
+  B19 --> B21(["loop()"])
+  B20 --> B21
+
+classDef epd fill:#F6EDDD,stroke:#A96C12,color:#4A3208;
+classDef ble fill:#E4EDF6,stroke:#2E6FA8,color:#123048;
+class B12,B13 epd;
+class B9,B15,B16 ble;
+</pre>
+      </div>
+      <div class="plate-note">Amber = panel work. Blue = BLE stack. The wake branch is ESP32-only: nRF has no deep sleep, so it always takes the left-hand path and always redraws the boot screen on reset.</div>
+    </div>
+
+    <p>Two boot details matter downstream. First, <code>RTC_DATA_ATTR</code> does <em>not</em> survive panic/WDT/SW/brownout resets — the bootloader reloads those segments from the app image on every reset except a deep-sleep wake, so a hidden mid-cycle reset arrives at the NORMAL BOOT branch with <code>deep_sleep_count == 0</code>, indistinguishable from a true first boot. <span class="src">main.cpp:145-154</span> Second, the diagnostic env <code>nrf52840-bootdiag</code> makes <code>setup()</code> block on <code>while (!Serial)</code> with no timeout — with no USB host attached the device never advertises, never drives the panel and never reaches <code>loop()</code>. It is excluded from <code>default_envs</code>, CI and releases. <span class="src">main.cpp:79-94, platformio.ini</span></p>
+  </section>
+
+  <!-- ============================================================= -->
+  <section>
+    <h2><span class="num">03</span> The loop pass</h2>
+    <p class="lede">One body serves both targets. The per-target policy that genuinely differs lives in two hooks — <code>platformLoopPrologue()</code> and <code>platformIdle()</code> — and everything else is shared. <span class="src">main.cpp:633-718</span></p>
+
+    <div class="plate">
+      <div class="plate-head"><span class="fig">Fig. 2 — anatomy of one loop() pass</span><span>main.cpp:635-718</span></div>
+      <div class="plate-body">
+<pre class="mermaid">
+%%{init: {'theme':'neutral','flowchart':{'curve':'linear','nodeSpacing':26,'rankSpacing':30}}}%%
+flowchart TD
+  L0(["loop() entry"]) --> L1["1 serviceBleEvents<br/>consume connect/disconnect,<br/>requestFastLink, RX flush to boundary"]
+  L1 --> L2["2 diagHeartbeat - 5 s, gated on BLE link"]
+  L2 --> L3["3 processLedFlash"]
+  L3 --> L4["4 epdSessionTick - keep-alive expiry"]
+  L4 --> L5["5 buzzerService"]
+  L5 --> P{"6 platformLoopPrologue"}
+
+  P -- "ESP32: pollActivity, then<br/>woke_from_deep_sleep AND advertising window?" --> W{"client connected?"}
+  P -- "nRF: always false" --> L7
+  W -- yes --> W1["fullSetupAfterConnection<br/>clear wake flags"] --> RET(["return - pass ends"])
+  W -- no --> W2["disconnect cleanup + adv restart<br/>idle >= sleep_timeout_ms AND no min-wake hold?"]
+  W2 -- yes --> W3["enterDeepSleep - never returns"]
+  W2 -- no --> W4["idleDelay(50)"] --> RET
+
+  L7["7 serviceBleRx - drain up to<br/>COMMAND_QUEUE_SIZE frames,<br/>serviceBleTx between each"] --> L8["8 serviceBleTx - up to 16 notifies"]
+  L8 --> L9["9 serviceBleDisconnectCleanup<br/>deferred while epdRefreshInProgress"]
+  L9 --> L10["10 updatemsdata if connect flagged it"]
+  L10 --> L11["11 serviceBleAdvertisingRestart<br/>no-op on nRF - stack re-arms itself"]
+  L11 --> L12["12 direct-write watchdog - 15 min"]
+  L12 --> L13["13 checkPartialWriteTimeout - 15 min"]
+  L13 --> L14{"OPENDISPLAY_HAS_WIFI?"}
+  L14 -- yes --> L15["14 handleWiFiServer - roam, accept,<br/>TLS step, drain up to 16 KB, dispatch<br/>+ WiFi.status probe every 10 s"]
+  L14 -- no --> L16
+  L15 --> L16{"15 workInFlight?<br/>rxQ or txQ pending, BLE connected,<br/>adv-restart pending, refresh in progress,<br/>or live LAN session"}
+  L16 -- yes --> L17["delay(1) - one scheduler tick"]
+  L16 -- no --> L18["platformIdle<br/>ESP32: deep-sleep gate or idleDelay(5), MSD every 60 s<br/>nRF: idleDelay(sleep_timeout_ms) + MSD, else idleDelay(500)"]
+  L17 --> L19
+  L18 --> L19["16 ble.tick - nRF adv-interval restore, no-op on ESP32"]
+  L19 --> L20["17 processButtonEvents"]
+  L20 --> L21["18 processTouchInput"]
+  L21 --> L22["19 buzzerService"]
+  L22 --> END(["next pass"])
+
+classDef ble fill:#E4EDF6,stroke:#2E6FA8,color:#123048;
+classDef lan fill:#EBE6F7,stroke:#6B4FB8,color:#2B1E4A;
+classDef epd fill:#F6EDDD,stroke:#A96C12,color:#4A3208;
+classDef per fill:#E1F0EA,stroke:#22755A,color:#0E3A2C;
+classDef haz fill:#F7E5E1,stroke:#B03A2A,color:#511710;
+class L1,L7,L8,L9,L10,L11 ble;
+class L15 lan;
+class L4,L12,L13 epd;
+class L3,L5,L20,L21,L22 per;
+class W3 haz;
+</pre>
+      </div>
+      <div class="plate-note">Blue = BLE · violet = LAN · amber = panel · green = peripherals · red = terminal. Steps 7-19 are skipped entirely while the ESP32 wake-advertising window is open.</div>
+    </div>
+
+    <h3>Step-by-step, with bounds</h3>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th class="num">#</th><th>Call</th><th>Services</th><th>Bound / cadence</th><th>Target</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="step">1</td><td><code>serviceBleEvents()</code><br><span class="src">main.cpp:465</span></td><td><span class="chip c-ble">BLE</span> consumes the connect/disconnect events; on connect clears <code>rebootFlag</code>, samples heap, calls <code>requestFastLink()</code>; on disconnect logs reason, discards the departed client's queued frames up to the captured RX boundary, raises cleanup + adv-restart</td><td>Non-blocking; runs before anything reading those flags</td><td>both</td></tr>
+          <tr><td class="step">2</td><td><code>diagHeartbeat()</code><br><span class="src">diagnostics.cpp:85</span></td><td>Emits <code>[hb] up= loops= rxQ= txQ= free= drops=</code> at DEBUG</td><td>5 s, only while a BLE link is up; re-armed on the connect edge</td><td>both</td></tr>
+          <tr><td class="step">3</td><td><code>processLedFlash()</code><br><span class="src">device_control.cpp:530</span></td><td><span class="chip c-per">LED</span> advances the async flash state machine when its delay expires</td><td>millis() poll, no blocking</td><td>both</td></tr>
+          <tr><td class="step">4</td><td><code>epdSessionTick()</code><br><span class="src">display_service.cpp:521</span></td><td><span class="chip c-epd">panel</span> powers the panel down <code>screen_timeout_seconds</code> after the last release; try-lock, skips the pass if a transfer holds it</td><td>millis() poll; the force-off it triggers costs <code>bbepSleep</code> + <code>delay(50)</code></td><td>both</td></tr>
+          <tr><td class="step">5</td><td><code>buzzerService()</code><br><span class="src">buzzer_control.cpp:239</span></td><td><span class="chip c-per">buzzer</span> ends the current tone/gap and advances the sequence</td><td>millis() poll</td><td>both</td></tr>
+          <tr><td class="step">6</td><td><code>platformLoopPrologue()</code><br><span class="src">main.cpp:546</span></td><td>ESP32: <code>pollActivity()</code> then the wake-advertising window (may claim the whole pass, or sleep). nRF: returns false immediately</td><td>See §5</td><td><span class="chip c-off">ESP32 only</span></td></tr>
+          <tr><td class="step">7</td><td><code>serviceBleRx()</code><br><span class="src">main.cpp:527</span></td><td><span class="chip c-ble">BLE</span> the <em>only</em> command dispatch site on either target; peeks the ring, calls <code>imageDataWritten()</code>, flushes TX between commands</td><td>≤ <code>COMMAND_QUEUE_SIZE</code> = <code>PIPE_MAX_W + 2</code> frames per pass. Per-frame cost is unbounded in principle — a single frame can end in a panel refresh</td><td>both</td></tr>
+          <tr><td class="step">8</td><td><code>serviceBleTx()</code><br><span class="src">command_queue.cpp:187</span></td><td><span class="chip c-ble">BLE</span> drains queued responses to notifications; stops on backpressure and retries next pass; discards everything if no link</td><td>≤ 16 notifies per call</td><td>both</td></tr>
+          <tr><td class="step">9</td><td><code>serviceBleDisconnectCleanup()</code><br><span class="src">main.cpp:392</span></td><td><span class="chip c-epd">panel</span> + <span class="chip c-ble">session</span> direct-write teardown, partial-write release, pipe state reset — but only if the transport that <em>owns</em> the transfer is the one that went away</td><td>Deferred entirely while <code>epdRefreshInProgress</code>; flag stays raised for a later pass</td><td>both</td></tr>
+          <tr><td class="step">10</td><td><code>updatemsdata()</code> (if flagged)<br><span class="src">display_service.cpp:1753</span></td><td><span class="chip c-per">sensors</span> + <span class="chip c-ble">advert</span> polls SHT40/BQ27220 (30 s TTL each), battery ADC (30 s TTL), chip temperature, rebuilds the 16-byte MSD and republishes if changed</td><td>Skips the advertisement rebuild when the payload is unchanged</td><td>both</td></tr>
+          <tr><td class="step">11</td><td><code>serviceBleAdvertisingRestart()</code><br><span class="src">main.cpp:435</span></td><td><span class="chip c-ble">BLE</span> re-arms the radio, deferring while the stack is down, already reconnected, or mid-refresh</td><td>Clears the flag unserviced on nRF — the SoftDevice re-arms itself</td><td>both</td></tr>
+          <tr><td class="step">12</td><td>direct-write watchdog<br><span class="src">main.cpp:664-670</span></td><td><span class="chip c-epd">panel</span> tears down a stuck direct-write session</td><td>900 000 ms = 15 min</td><td>both (shared as of Phase 4)</td></tr>
+          <tr><td class="step">13</td><td><code>checkPartialWriteTimeout()</code><br><span class="src">display_service.cpp:580</span></td><td><span class="chip c-epd">panel</span> same, for partial / pipe-partial sessions</td><td>900 000 ms = 15 min</td><td>both</td></tr>
+          <tr><td class="step">14</td><td><code>handleWiFiServer()</code><br><span class="src">wifi_service.cpp:848</span></td><td><span class="chip c-lan">LAN</span> roam service, accept, TLS handshake step, read + frame-parse + dispatch</td><td>≤ 16 384 bytes drained per pass; link-status probe every 10 s</td><td><span class="chip c-off">ESP32 + WiFi envs</span></td></tr>
+          <tr><td class="step">15</td><td><code>workInFlight</code> branch<br><span class="src">main.cpp:704-713</span></td><td>Chooses <code>delay(1)</code> versus the per-target idle policy</td><td>One scheduler tick when anything is in flight — <em>including a merely connected, idle BLE link</em></td><td>both</td></tr>
+          <tr><td class="step">16</td><td><code>ble.tick()</code></td><td><span class="chip c-ble">BLE</span> restores the advertising interval after a boost window</td><td>nRF: stop+start advertising once the 3 s boost lapses. ESP32: no-op</td><td>both</td></tr>
+          <tr><td class="step">17</td><td><code>processButtonEvents()</code><br><span class="src">device_control.cpp:592</span></td><td><span class="chip c-per">buttons</span> power-latch hold poll, configured power-off buttons, ADC ladder, then the ISR-flagged edge → MSD byte → <code>boostAdvertising()</code> → <code>updatemsdata()</code></td><td>Polls each pass; a long-press hold triggers power-off</td><td>both</td></tr>
+          <tr><td class="step">18</td><td><code>processTouchInput()</code><br><span class="src">touch_input.cpp:575</span></td><td><span class="chip c-per">touch</span> GT911 IRQ/line/timed read, coordinate mapping, MSD bytes, <code>updatemsdata()</code> on change</td><td>≥ 100 ms between passes; <strong>skipped entirely</strong> while <code>transferActive()</code> or an EPD refresh is suspended</td><td>both</td></tr>
+          <tr><td class="step">19</td><td><code>buzzerService()</code></td><td>Second service point, closing the pass</td><td>millis() poll</td><td>both</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note ble">
+      <strong>Ordering is load-bearing.</strong> Cleanup (9) runs before the advertising restart (11) so a disconnected session is fully torn down before the radio re-arms. The RX flush inside (1) is bounded by a boundary captured <em>in the disconnect callback</em>, not at service time — because <code>loop()</code> can sit inside a ~16 s refresh, during which a disconnect, a reconnect and the new client's first command all land. <span class="src">main.cpp:479-515, command_queue.cpp:108-133</span>
+    </div>
+  </section>
+
+  <!-- ============================================================= -->
+  <section>
+    <h2><span class="num">04</span> idleDelay() — the cooperative wait</h2>
+    <p class="lede">The only sanctioned way for <code>loop()</code> to wait. It is called <em>only</em> from <code>loop()</code>, never from a command handler — which is what makes its RX rule safe to state as a hard invariant. <span class="src">main.cpp:725-751</span></p>
+
+    <div class="duo">
+      <div>
+        <h4>Serviced during the wait</h4>
+        <ul>
+          <li><code>ble.tick()</code> — nRF only</li>
+          <li><code>processButtonEvents()</code></li>
+          <li><code>processTouchInput()</code></li>
+          <li><code>processLedFlash()</code></li>
+          <li><code>epdSessionTick()</code> — keep-alive still expires</li>
+          <li><code>buzzerService()</code></li>
+          <li><code>serviceBleTx()</code> — safe, it only notifies</li>
+          <li>Early return the moment <code>bleRxQueuePending()</code></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Not serviced</h4>
+        <ul>
+          <li><code>serviceBleEvents()</code> — connect/disconnect wait for the next pass</li>
+          <li><code>serviceBleRx()</code> — <strong>deliberate</strong>: dispatching here would make command handlers reentrant and corrupt multi-frame transfer state</li>
+          <li><code>serviceBleDisconnectCleanup()</code> / <code>serviceBleAdvertisingRestart()</code></li>
+          <li><code>handleWiFiServer()</code> — LAN is frozen for the wait</li>
+          <li>The two 15-minute session watchdogs</li>
+          <li><code>diagHeartbeat()</code> / periodic <code>updatemsdata()</code></li>
+        </ul>
+      </div>
+    </div>
+
+    <p>The wait is chunked at 100 ms, so command latency is capped at one chunk rather than the caller's full delay — which is what makes nRF's move to loop-side dispatch viable, given its idle waits are 500 ms and up.</p>
+  </section>
+
+  <!-- ============================================================= -->
+  <section>
+    <h2><span class="num">05</span> ESP32 power policy — the two hooks</h2>
+    <p class="lede">Deep sleep, the wake-advertising window and the activity poller are ESP32-only capabilities, hooked rather than merged into the shared body.</p>
+
+    <h3>pollActivity() — one point of activity detection</h3>
+    <p>Rather than have every producer stamp a timestamp, the poller samples state the producers already mutate and treats any change since the previous pass as activity: RX/TX queue heads, connection count, live LAN session, the 11-byte <code>dynamicreturndata</code> block (buttons and touch land here), the pending advertising-restart flag, and any pending queue work. It runs at the top of the pass so an event raised during the previous pass always lands before this pass decides to sleep. <span class="src">main.cpp:333-380</span></p>
+
+    <div class="note">
+      <strong>A connected link is activity in itself.</strong> <code>connCount > 0</code> stamps <code>lastActivityMs</code> on every pass, so a client that connects and does nothing holds the device awake indefinitely — by design, not by omission.
+    </div>
+
+    <h3>The wake-advertising window</h3>
+    <p>On a deep-sleep wake, <code>platformLoopPrologue()</code> claims the entire pass — steps 7 through 19 of the main body never run — and re-enters on a 50 ms <code>idleDelay()</code> cadence until one of three things happens: a client connects (→ <code>fullSetupAfterConnection()</code>, window closed), the quiet window elapses with no min-wake hold (→ <code>enterDeepSleep()</code>), or work keeps re-arming the window. The window is measured from <em>last activity</em>, not from window start, so a client that connects and drops re-arms the full window. <span class="src">main.cpp:546-589</span></p>
+    <p>Inside the window the branch still calls <code>serviceBleDisconnectCleanup()</code> and <code>serviceBleAdvertisingRestart()</code> before the timeout test, because a connect-and-drop entirely inside one poll gap would otherwise leave the radio dark for the rest of the window.</p>
+
+    <h3>Idle policy, by target</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Condition</th><th>ESP32 <span class="src">main.cpp:594-622</span></th><th>nRF <span class="src">main.cpp:623-630</span></th></tr></thead>
+        <tbody>
+          <tr><td>Battery + deep sleep configured</td><td>Quiet &lt; hold, or min-wake hold active → <code>idleDelay(5)</code>; otherwise <code>enterDeepSleep()</code></td><td>n/a</td></tr>
+          <tr><td>Mains / no deep sleep</td><td><code>idleDelay(5)</code> — deliberately short: a 2000 ms idle stalled the first BLE exchange by up to 2 s</td><td><code>idleDelay(sleep_timeout_ms)</code> then <code>updatemsdata()</code>; if that is 0, <code>idleDelay(500)</code> with <strong>no</strong> MSD refresh</td></tr>
+          <tr><td>Periodic advert refresh</td><td><code>updatemsdata()</code> every 60 000 ms</td><td>Once per idle wait, only when <code>sleep_timeout_ms &gt; 0</code></td></tr>
+          <tr><td><code>sleep_timeout_ms</code> means</td><td>The quiet window required before sleeping (default 10 000 ms when 0)</td><td>The length of the idle wait itself</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p><code>enterDeepSleep()</code> re-checks every precondition — power mode, sleep time, a live link, the min-wake hold — <em>before</em> stopping advertising, because everything past that point commits to <code>esp_deep_sleep_start()</code>. It then forces the panel off, tears the BLE stack down, arms the timer and button wake sources, flushes the log, holds the power latch and sleeps. Total blocking before the sleep call: <code>delay(200) + delay(100) + delay(5) + delay(100)</code>. <span class="src">main.cpp:777-833</span></p>
+  </section>
+
+  <!-- ============================================================= -->
+  <section>
+    <h2><span class="num">06</span> BLE servicing</h2>
+    <p class="lede">Two rings and a strict task boundary. Frames in from the stack callback, responses out to it, dispatch in the middle on the loop task only.</p>
+
+    <div class="plate">
+      <div class="plate-head"><span class="fig">Fig. 3 — a BLE frame, end to end</span><span>command_queue.cpp · communication.cpp · main.cpp</span></div>
+      <div class="plate-body">
+<pre class="mermaid">
+%%{init: {'theme':'neutral','sequence':{'wrap':true,'width':190}}}%%
+sequenceDiagram
+  participant C as Central
+  participant S as Stack callback task<br/>NimBLE host / ada_callback
+  participant R as RX ring<br/>PIPE_MAX_W + 2 slots
+  participant L as loop task
+  participant T as TX ring<br/>10 slots
+  C->>S: GATT write, <= OD_BLE_MAX_FRAME
+  Note over S: copy + flag ONLY.<br/>Logs the arrival hex line at DEBUG
+  S->>R: bleRxQueuePush, RELEASE store
+  Note over R: drops: empty / too large / ring full
+  L->>R: serviceBleRx peeks, up to<br/>COMMAND_QUEUE_SIZE per pass
+  L->>L: imageDataWritten - decrypt in place,<br/>opcode switch, handler runs
+  L->>T: sendResponse - CCM wrap if authenticated,<br/>then bleTxQueuePush
+  L->>T: serviceBleTx between every command
+  T->>C: notify, <= 16 per call
+  Note over T: false = backpressure,<br/>entry stays queued for next pass
+</pre>
+      </div>
+      <div class="plate-note">The RX ring depth is derived, not chosen: it must absorb a full unacknowledged PIPE window plus the END frame that sits outside the window's sequence space, during a stall of up to 60 s. Hence <code>PIPE_MAX_W + 2</code> slots for <code>PIPE_MAX_W + 1</code> usable.</div>
+    </div>
+
+    <h3>Command dispatch</h3>
+    <p><code>imageDataWritten()</code> is the single dispatcher for both transports. <code>AUTHENTICATE</code> (0x0050) and <code>FIRMWARE_VERSION</code> (0x0043) are handled ahead of the encryption gate as the handshake; a frame arriving over TLS-PSK LAN bypasses the app-layer CCM envelope entirely; everything else must decrypt or is rejected. The switch then covers reboot, config read/write/chunk/clear, MSD read, DFU, power-off, deep-sleep, the legacy direct-write trio 0x0070–0x0072, LED activate/stop, partial-write start 0x0076, buzzer, and the PIPE trio 0x0080–0x0082. <span class="src">communication.cpp:541-704</span></p>
+
+    <h3>Responses</h3>
+    <p>Every response goes through <code>sendResponse()</code>, which applies the CCM envelope when authenticated (skipping the handshake opcodes, <code>FE</code>/<code>FF</code> statuses and TLS-origin frames), logs one TX line with the pre-enqueue ring depth, and routes to <em>the origin transport only</em> — BLE ring or LAN frame, never both. <span class="src">communication.cpp:211-276</span> Handlers that generate many responses in one call flush the ring themselves: <code>handleReadConfig()</code> calls <code>serviceBleTx()</code> between chunks, because the loop task is the ring's only drainer and cannot run until the handler returns. <span class="src">communication.cpp:388-397</span></p>
+
+    <h3>Link tuning</h3>
+    <p>Both targets request 2 Mbps PHY and 251-octet DLE when the connect event is consumed — from the loop task, not the callback, since those are stack calls. nRF logs the link twice (baseline at connect, negotiated ~2.5 s later via a one-shot timer); ESP32 logs on the PHY-update and MTU-change callbacks instead. <span class="src">ble_transport_nrf.cpp:270-294, ble_transport_esp32.cpp:311-327</span></p>
+  </section>
+
+  <!-- ============================================================= -->
+  <section>
+    <h2><span class="num">07</span> LAN servicing <span class="chip c-lan">ESP32 + WiFi envs only</span></h2>
+    <p class="lede">A second command origin with its own framing, its own security model and — unlike BLE — no ring between the wire and the dispatcher.</p>
+
+    <div class="plate">
+      <div class="plate-head"><span class="fig">Fig. 4 — handleWiFiServer(), one pass</span><span>wifi_service.cpp:848-988</span></div>
+      <div class="plate-body">
+<pre class="mermaid">
+%%{init: {'theme':'neutral','flowchart':{'curve':'linear','nodeSpacing':26,'rankSpacing':28}}}%%
+flowchart TD
+  A(["handleWiFiServer"]) --> B["serviceLanRoam<br/>drain deferred WiFi events,<br/>rescan fallback, queued roam"]
+  B --> C{"roam queued AND idle?"}
+  C -- "client attached or transferActive" --> D["defer - a channel scan<br/>would break the transfer"]
+  C -- idle --> E["disconnect + re-associate"]
+  D --> F
+  E --> F{"associated?"}
+  F -- no --> G["close any LAN session, return"]
+  F -- yes --> H["wifiServer.accept<br/>new client replaces previous,<br/>TCP_NODELAY, TLS session begin"]
+  H --> I{"TLS handshake done?"}
+  I -- "one step per pass" --> J["mbedtls_ssl_handshake, return"]
+  I -- yes --> K["read into 16 KB buffer"]
+  K --> L{"got"}
+  L -- "closed / error" --> M["disconnectWiFiServer"]
+  L -- "0 bytes and none this pass" --> N["idle timeout check, return"]
+  L -- "> 0" --> O["parse len-prefixed frames<br/>dispatch each via imageDataWritten<br/>origin = LAN_TLS or LAN_PLAIN"]
+  O --> P{"drained < 16 KB<br/>and channel still readable?"}
+  P -- yes --> K
+  P -- no --> Q(["return to loop"])
+
+classDef lan fill:#EBE6F7,stroke:#6B4FB8,color:#2B1E4A;
+class B,H,K,O lan;
+</pre>
+      </div>
+      <div class="plate-note">The 16 KB per-pass budget is what bounds LAN's hold on <code>loop()</code> so BLE drain, peripherals and the deep-sleep gate still run under a saturating streaming client.</div>
+    </div>
+
+    <p>LAN and BLE both raise the same transfer-cleanup flag, which is why the cleanup handler checks <em>which</em> transport owns the in-flight transfer before tearing anything down — otherwise a BLE disconnect would kill a live LAN push, and vice versa. <span class="src">main.cpp:396-417</span> WiFi driver events (association, disconnect, got-IP, RSSI-low) are captured in volatile flags and executed on the loop task, never in the callback. <span class="src">wifi_service.cpp:480-488, 649-676</span></p>
+  </section>
+
+  <!-- ============================================================= -->
+  <section>
+    <h2><span class="num">08</span> Screen servicing</h2>
+    <p class="lede">Panel power is a three-state machine with a single actuator, and every image transfer path converges on the same blocking refresh wait.</p>
+
+    <div class="plate">
+      <div class="plate-head"><span class="fig">Fig. 5 — EPD panel power session</span><span>display_service.cpp:392-534, main.cpp:865-965</span></div>
+      <div class="plate-body">
+<pre class="mermaid">
+%%{init: {'theme':'neutral'}}%%
+stateDiagram-v2
+  [*] --> PWR_OFF
+  PWR_OFF --> PWR_ACTIVE: epdSessionAcquire - COLD<br/>pwrmgm(true), rail up + delay(800),<br/>bbepInitIO, wake, init sequence
+  PWR_WARM --> PWR_ACTIVE: epdSessionAcquire - WARM<br/>skips rail bring-up, cancels deadline
+  PWR_ACTIVE --> PWR_WARM: epdSessionRelease(success)<br/>keep-alive armed, controller stays awake
+  PWR_ACTIVE --> PWR_OFF: epdSessionRelease(fail)<br/>or keep-alive window = 0
+  PWR_WARM --> PWR_OFF: epdSessionTick - deadline passed<br/>bbepSleep + delay(50) + rail cut
+  PWR_ACTIVE --> PWR_OFF: epdSessionForceOff<br/>disconnect teardown, deep sleep
+</pre>
+      </div>
+      <div class="plate-note">Keep-alive comes from <code>screen_timeout_seconds</code>, clamped to <code>EPD_KEEPALIVE_MAX_S</code>, and is forced to 0 on AXP2101 boards. On battery ESP32 the effective window is <code>min(configured, idle-hold)</code>, because <code>enterDeepSleep()</code> forces the panel off.</div>
+    </div>
+
+    <h3>Three transfer paths, one refresh</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Path</th><th>Opcodes</th><th>Streaming</th><th>Completion</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>DIRECT (legacy)</td><td>0x0070 / 0x0071 / 0x0072</td>
+            <td>Chunks stream straight to controller RAM — <code>bbepWriteData</code>, gray4 plane splitting, or zlib-inflate-then-sink</td>
+            <td>Explicit END, or auto-finish the moment <code>directWriteBytesWritten &gt;= directWriteTotalBytes</code> <span class="src">display_service.cpp:2311</span></td>
+          </tr>
+          <tr>
+            <td>PIPE (sliding window)</td><td>0x0080 / 0x0081 / 0x0082</td>
+            <td>In-order frames stream immediately; out-of-order frames are held in the reorder queue and the controller stream pauses at the hole. SACK-style ACKs, rate-limited by the negotiated <code>ack_every</code></td>
+            <td>Explicit END, or auto-complete for uncompressed full-frame transfers <span class="src">display_service.cpp:2845</span></td>
+          </tr>
+          <tr>
+            <td>PARTIAL</td><td>0x0076, or PIPE with the partial flag</td>
+            <td>Two 1-bpp controller planes into a validated rectangle; white fills first unless the rect is the full frame</td>
+            <td><strong>Never</strong> auto-completes — the END alone carries the refresh selector and new etag</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>All four refresh trigger sites end in <code>waitforrefresh(60)</code>, which wraps a heap sample around the poll loop so a refresh timeout appears in the log. <span class="src">display_service.cpp:545, 2417, 2426, 3239, 3242</span> Around the refresh, <code>epdRefreshInProgress</code> is raised — the flag that defers disconnect cleanup and advertising restart, and that keeps <code>workInFlight</code> true. <span class="src">display_service.cpp:2409, 3282</span></p>
+
+    <p>Before the blocking refresh, <code>directWriteFinishAndRefresh()</code> pushes the END ack onto the air with an explicit <code>serviceBleTx()</code> — because the loop task is the response ring's only drainer, and without it the client sits in its tail-flush probe and aborts an already-complete transfer on timeout. <span class="src">display_service.cpp:2396-2407</span> Touch is suspended across every refresh and resumed after, with a GT911 light-resume or reinit. <span class="src">touch_input.cpp:114, 416</span></p>
+  </section>
+
+  <!-- ============================================================= -->
+  <section>
+    <h2><span class="num">09</span> Peripheral servicing cadence</h2>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Peripheral</th><th>Serviced from</th><th>Cadence / gate</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td><span class="chip c-per">Buttons</span> GPIO</td><td>loop step 17 + <code>idleDelay</code></td><td>Every pass; ISR sets a flag, the poll reads the pin</td><td>Edge publishes to MSD, boosts advertising (nRF), republishes the advert</td></tr>
+          <tr><td><span class="chip c-per">Power latch</span> hold</td><td><code>powerButtonPoll()</code> in step 17</td><td>Every pass; needs the button released once since boot</td><td>Power-off fires when the hold exceeds <code>POWER_OFF_HOLD_MS</code> <span class="src">power_latch.cpp:197</span></td></tr>
+          <tr><td><span class="chip c-per">ADC ladder</span></td><td><code>pollAdcButtons()</code> in step 17</td><td>Every pass, ESP32 only</td><td>nRF skips registration <em>and</em> the digital fallback</td></tr>
+          <tr><td><span class="chip c-per">Touch</span> GT911</td><td>loop step 18 + <code>idleDelay</code></td><td>≥ 100 ms; IRQ edge, held-low line, or timed poll; 100 ms backoff after an I²C failure; controller disabled after a failure streak</td><td><strong>Suppressed</strong> while any transfer is active or a refresh is suspended — I²C contends with the transfer for the bus and the loop task</td></tr>
+          <tr><td><span class="chip c-per">LED</span> flash</td><td>loop step 3 + <code>idleDelay</code></td><td>millis()-driven state machine</td><td>Non-blocking by construction</td></tr>
+          <tr><td><span class="chip c-per">Buzzer</span></td><td>loop steps 5 and 19 + <code>idleDelay</code></td><td>millis()-driven step/gap advance</td><td>Serviced twice per pass, and inside every cooperative wait</td></tr>
+          <tr><td><span class="chip c-per">SHT40</span> temp/RH</td><td><code>updatemsdata()</code></td><td>30 000 ms TTL <span class="src">sensor_sht40.cpp:239</span></td><td>I²C read; one warning per failure streak</td></tr>
+          <tr><td><span class="chip c-per">BQ27220</span> gauge</td><td><code>updatemsdata()</code></td><td>30 000 ms TTL <span class="src">sensor_bq27220.cpp:142</span></td><td>Voltage + SoC + charger GPIO</td></tr>
+          <tr><td><span class="chip c-per">Battery ADC</span></td><td><code>readBatteryVoltage()</code></td><td>30 000 ms TTL; the uncached read costs <code>delay(10)</code> + 10 × <code>delay(2)</code> <span class="src">display_service.cpp:1695-1738</span></td><td>Gauge takes precedence when configured</td></tr>
+          <tr><td><span class="chip c-ble">MSD advert</span></td><td>connect, button, touch, and the idle path</td><td>ESP32 60 s; nRF per idle wait when <code>sleep_timeout_ms &gt; 0</code></td><td>Rebuild is skipped when the 16 bytes are unchanged</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================================================= -->
+  <section>
+    <h2><span class="num">10</span> Starvation ledger</h2>
+    <p class="lede">Every point where <code>loop()</code> stops making progress, with its bound and what stops with it. Ordered by exposure.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Site</th><th class="num">Bound</th><th>What stops</th><th>Basis</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>waitforrefreshInner()</code> BUSY poll<br><span class="src">display_service.cpp:765-794</span></td>
+            <td class="num"><span class="chip c-haz">≤ 60 s</span><br>timeout×100 × <code>delay(10)</code></td>
+            <td><strong>Everything.</strong> No BLE events, no RX dispatch, no TX drain, no buttons, touch, LED, buzzer, no <code>epdSessionTick</code>, no LAN, no watchdogs. It is a dead zone, not merely a busy one.</td>
+            <td>All four call sites pass 60. A 15.98 s refresh was captured on a Spectra 6-colour panel; the design note describing this is explicitly <em>proposed, not implemented</em>. <span class="src">docs/DESIGN_COOPERATIVE_REFRESH_WAIT_2026-07-27.md</span></td>
+          </tr>
+          <tr>
+            <td>SPI streaming inside a transfer — <code>bbepWriteData</code> via <code>pipeConsumePayload</code> / <code>partial_write_stream_bytes</code></td>
+            <td class="num">Design point: a 60 s Spectra stall</td>
+            <td>The whole pass; the RX ring absorbs arrivals meanwhile</td>
+            <td>Stated as the worst case the ring is sized for. <span class="src">command_queue.h:26-40</span></td>
+          </tr>
+          <tr>
+            <td>Cold panel bring-up — <code>pwrmgm(true)</code></td>
+            <td class="num">~900 ms<br><code>delay(800)</code> + <code>delay(100)</code></td>
+            <td>The whole pass. Warm re-acquire skips it.</td>
+            <td><span class="src">main.cpp:914, 942</span></td>
+          </tr>
+          <tr>
+            <td>Panel init sequence — <code>initBbepPanelSession()</code></td>
+            <td class="num">200 ms</td>
+            <td>The whole pass</td>
+            <td><span class="src">display_service.cpp:341, 349</span></td>
+          </tr>
+          <tr>
+            <td>Panel force-off — <code>bbepSleep</code> + settle</td>
+            <td class="num">50 ms</td>
+            <td>The whole pass; reachable from <code>epdSessionTick</code> inside <code>idleDelay</code></td>
+            <td><span class="src">display_service.cpp:433</span></td>
+          </tr>
+          <tr>
+            <td>Log emit — lock wait then TX-room wait<br><span class="src">od_log.cpp:44, 59, 111-123</span></td>
+            <td class="num">≤ 40 ms per line on USB CDC<br>≤ 270 ms per line on UART</td>
+            <td>The calling task. On the <code>-debug</code> envs the RX hex line runs on the <em>stack callback task</em>, delaying the NimBLE host / SoftDevice callback rather than <code>loop()</code>.</td>
+            <td>20 ms lock + 20 ms (CDC default) or 250 ms (UART, set in setup). One image push emits ~300 lines at DEBUG. <span class="src">main.cpp:110, od_log.cpp:36, command_queue.cpp:38-41</span></td>
+          </tr>
+          <tr>
+            <td><code>od_log_flush()</code></td>
+            <td class="num">flush + 5 ms, 16 sites</td>
+            <td>The calling task; ≤ ~80 ms across a boot</td>
+            <td><span class="src">od_log.cpp:275-291</span></td>
+          </tr>
+          <tr>
+            <td>LAN drain + TLS</td>
+            <td class="num">≤ 16 384 B per pass; one handshake step per pass</td>
+            <td>BLE drain, peripherals and the deep-sleep gate for the duration — the budget exists to bound exactly this</td>
+            <td><span class="src">wifi_service.cpp:923-987</span></td>
+          </tr>
+          <tr>
+            <td><code>handleReadConfig()</code></td>
+            <td class="num">≤ ceil(MAX_CONFIG_SIZE / 94) chunks</td>
+            <td>The pass; TX is flushed between chunks so the 10-slot ring cannot overflow</td>
+            <td><span class="src">communication.cpp:367-398</span></td>
+          </tr>
+          <tr>
+            <td><code>touchResumeAfterEpdRefresh()</code></td>
+            <td class="num">200 ms settle + per-controller reinit</td>
+            <td>The pass, after every refresh</td>
+            <td><span class="src">touch_input.cpp:416-443</span></td>
+          </tr>
+          <tr>
+            <td>Uncached battery read</td>
+            <td class="num">~30 ms (10 ms enable + 10 × 2 ms)</td>
+            <td>The pass, at most once per 30 s</td>
+            <td><span class="src">display_service.cpp:1706-1717</span></td>
+          </tr>
+          <tr>
+            <td>Terminal commands — <code>reboot()</code>, <code>enterDeepSleep()</code></td>
+            <td class="num">100 ms / ~405 ms then never returns</td>
+            <td>Everything, permanently</td>
+            <td><span class="src">device_control.cpp reboot(), main.cpp:812-832</span></td>
+          </tr>
+          <tr>
+            <td><span class="chip c-haz">nRF</span> task-priority starvation</td>
+            <td class="num">unbounded</td>
+            <td><code>loop()</code> makes no progress while higher-priority BLE/callback tasks are runnable — no single call site is responsible</td>
+            <td>Loop = prio 1, callback = 2, BLE/SOC = 3. The heartbeat's <code>loops=</code> field exists to detect it. <span class="src">rtos.h:57-61, diagnostics.cpp:112-118</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note haz">
+      <strong>Compounding.</strong> The refresh dead zone and the deferred-work flags interact: cleanup and advertising restart are held off while <code>epdRefreshInProgress</code>, so a disconnect arriving at the start of a 16 s refresh is serviced ~16 s late. Both known consequences of that lateness were fixed by making the deferred work correct <em>when serviced late</em> (a disconnect-time RX boundary, and an owner check outside the WiFi <code>#ifdef</code>) — neither reduces the lateness, and any future deferred-work path inherits the same exposure.
+    </div>
+  </section>
+
+  <!-- ============================================================= -->
+  <section>
+    <h2><span class="num">11</span> Spin ledger</h2>
+    <p class="lede">Loops that repeat without leaving the site, separated into bounded and unbounded.</p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Site</th><th>Shape</th><th>Bound</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>pwrmgmLockTake()</code><br><span class="src">display_service.cpp:403-411</span></td>
+            <td><code>while (exchange) { delay(1); }</code></td>
+            <td><span class="chip c-haz">unbounded by construction</span></td>
+            <td>Uncontended today — every acquire/release/force-off/tick caller is the loop task since dispatch moved off the callback task. Kept as defence in depth; <code>delay(1)</code> is <code>vTaskDelay</code>, so it yields rather than livelocking.</td>
+          </tr>
+          <tr>
+            <td><code>while (!Serial)</code><br><span class="src">main.cpp:81-88</span></td>
+            <td>Blink-and-wait for a USB host</td>
+            <td><span class="chip c-haz">unbounded by design</span></td>
+            <td><code>nrf52840-bootdiag</code> only — never in <code>default_envs</code>, CI or a release. Fatal on battery, which is stated in its env header.</td>
+          </tr>
+          <tr>
+            <td>ESP32 wake-advertising branch<br><span class="src">main.cpp:550-586</span></td>
+            <td>Returns from <code>platformLoopPrologue()</code> every pass after <code>idleDelay(50)</code></td>
+            <td>Until connect, or the quiet window expires with no min-wake hold</td>
+            <td>Steps 7-19 never run in this state. Touch and buttons <em>are</em> polled, via <code>idleDelay</code>.</td>
+          </tr>
+          <tr>
+            <td><code>od_wait_for_room()</code><br><span class="src">od_log.cpp:111-123</span></td>
+            <td><code>delay(1)</code> poll on <code>availableForWrite()</code></td>
+            <td>20 ms (CDC) / 250 ms (UART)</td>
+            <td><code>delay(1)</code> rather than a busy-wait so the USB task — the thing that drains the FIFO — gets to run</td>
+          </tr>
+          <tr>
+            <td><code>waitforrefreshInner()</code></td>
+            <td><code>delay(10)</code> BUSY poll</td>
+            <td>timeout × 100 iterations</td>
+            <td>Also errors out if BUSY never asserted on the first poll</td>
+          </tr>
+          <tr>
+            <td><code>serviceBleRx()</code></td>
+            <td>Drain loop</td>
+            <td><code>COMMAND_QUEUE_SIZE</code></td>
+            <td>Bounded so a full PIPE window burst is not starved at one frame per pass</td>
+          </tr>
+          <tr>
+            <td><code>serviceBleTx()</code></td>
+            <td>Drain loop</td>
+            <td>16 notifies, or first backpressure</td>
+            <td>Backpressure leaves the entry queued rather than advancing past a dropped ACK</td>
+          </tr>
+          <tr>
+            <td><code>idleDelay()</code></td>
+            <td>Chunked wait</td>
+            <td>100 ms chunks; early return on RX pending</td>
+            <td>Caps command latency at one chunk regardless of the caller's delay</td>
+          </tr>
+          <tr>
+            <td>PIPE reorder drain<br><span class="src">display_service.cpp:2829-2838</span></td>
+            <td>Drain contiguous successors after an in-order accept</td>
+            <td><code>PIPE_REORDER_SLOTS</code> occupancy</td>
+            <td>Each drained frame streams to the controller — bounded count, unbounded-ish cost</td>
+          </tr>
+          <tr>
+            <td><code>e1004_sink_bytes()</code><br><span class="src">display_service.cpp:273-292</span></td>
+            <td><code>while (len &gt; 0 &amp;&amp; streamOpen)</code></td>
+            <td>Explicit returns on zero plane size and on right-half completion</td>
+            <td>Cannot loop without consuming</td>
+          </tr>
+          <tr>
+            <td><code>handleWiFiServer()</code> read/dispatch</td>
+            <td><code>do … while (got &gt; 0 &amp;&amp; drained &lt; 16 KB)</code></td>
+            <td>16 384 bytes per pass</td>
+            <td>Also exits early if a dispatched command tore the session down</td>
+          </tr>
+          <tr>
+            <td><code>initWiFi(true)</code> connect wait</td>
+            <td>3 retries × 10 s + 2 s gaps</td>
+            <td>≤ ~34 s</td>
+            <td><strong>Not reachable in this firmware</strong> — all three call sites pass <code>false</code>. <span class="src">main.cpp:235, 758, communication.cpp:71</span></td>
+          </tr>
+          <tr>
+            <td><code>delay(1)</code> work-in-flight branch</td>
+            <td>One scheduler tick per pass</td>
+            <td>—</td>
+            <td>A connected but idle BLE link keeps <code>workInFlight</code> true, so <code>loop()</code> runs at the tick cadence for the whole session. This is the healthy <code>[hb] loops=</code>-in-the-thousands case.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================================================= -->
+  <section>
+    <h2><span class="num">12</span> ESP32 / nRF difference matrix</h2>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Concern</th><th>nRF52840</th><th>ESP32</th></tr></thead>
+        <tbody>
+          <tr><td>BLE stack</td><td>Adafruit Bluefruit / SoftDevice S140</td><td>NimBLE-Arduino 2.5.0</td></tr>
+          <tr><td>Advertising restart after disconnect</td><td>Stack re-arms itself (<code>restartOnDisconnect(true)</code>); the app's flag is cleared unserviced</td><td>Application schedules it, so it can be held off mid-refresh</td></tr>
+          <tr><td><code>ble.tick()</code></td><td>Restores the advertising interval after a boost window</td><td>No-op</td></tr>
+          <tr><td><code>boostAdvertising()</code></td><td>20-30 ms interval for 3 s, used on button edges</td><td>No-op</td></tr>
+          <tr><td><code>ble.end()</code></td><td>No-op — the SoftDevice stays up for the life of the firmware</td><td>Full controller deinit, for deep sleep and pre-restart</td></tr>
+          <tr><td>Deep sleep</td><td>None. No <code>pollActivity</code>, no wake window, no min-wake hold, no RTC-persisted state</td><td>Full: RTC vars, wake-advertising window, min-wake hold, button + timer wake</td></tr>
+          <tr><td><code>sleep_timeout_ms</code></td><td>Length of the idle wait</td><td>Quiet window required before sleeping</td></tr>
+          <tr><td>Periodic MSD refresh at idle</td><td>Once per idle wait, only when <code>sleep_timeout_ms &gt; 0</code></td><td>Every 60 s unconditionally</td></tr>
+          <tr><td>WiFi / LAN transport</td><td>Absent</td><td>Present on S3, C3, C6 envs (<code>OPENDISPLAY_ENABLE_WIFI</code>); absent on classic <code>esp32-N4</code></td></tr>
+          <tr><td>FastEPD (IT8951 / ED103)</td><td>Absent</td><td>S3 envs with <code>OPENDISPLAY_FASTEPD</code></td></tr>
+          <tr><td>Boot ordering</td><td>SoftDevice up before display/SPI; advertise after the boot screen</td><td>BLE after the display, because commands queue for <code>loop()</code></td></tr>
+          <tr><td>Log port</td><td>Native USB CDC only — a battery build with no host attached emits nothing</td><td>USB CDC, or UART1 on GPIO43/44 for the <code>-extuart</code> envs (4 KB TX ring, 250 ms room wait)</td></tr>
+          <tr><td>Heap telemetry</td><td>Sampled <code>mallinfo()</code> against linker symbols; <code>largest=n/a</code>; min-free is a loop-sampled approximation</td><td>True allocator counters, including <code>getMaxAllocHeap()</code> for fragmentation</td></tr>
+          <tr><td>zlib history window</td><td>Static storage (<code>USE_HEAP_WINDOW=0</code>)</td><td>Heap (<code>=1</code>); only <code>esp32-s3-E1004</code> sets 15-bit</td></tr>
+          <tr><td>RX ring depth</td><td><code>PIPE_MAX_W + 2</code></td><td>Same, but <code>esp32-N4</code> shrinks the window via <code>PIPE_SMALL_DRAM_WINDOW</code></td></tr>
+          <tr><td>Loop watchdog</td><td>None</td><td>Present in the SoC, not armed for the loop task</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="legend">
+      <span><i style="background:var(--ble-wash);border-color:var(--ble)"></i> BLE</span>
+      <span><i style="background:var(--lan-wash);border-color:var(--lan)"></i> LAN</span>
+      <span><i style="background:var(--epd-wash);border-color:var(--epd)"></i> Panel</span>
+      <span><i style="background:var(--per-wash);border-color:var(--per)"></i> Peripherals</span>
+      <span><i style="background:var(--haz-wash);border-color:var(--haz)"></i> Blocking / terminal</span>
+    </div>
+  </section>
+
+  <!-- ============================================================= -->
+  <footer>
+    <p><strong>Method.</strong> Traced from source on <code>fix/loop-hang-watchdog-and-nonblocking-log</code> at <code>1fc524b</code>. Primary files: <code>src/main.cpp</code>, <code>src/command_queue.{h,cpp}</code>, <code>src/ble_transport_{nrf,esp32}.cpp</code>, <code>src/communication.cpp</code>, <code>src/display_service.cpp</code>, <code>src/wifi_service.cpp</code>, <code>src/touch_input.cpp</code>, <code>src/device_control.cpp</code>, <code>src/power_latch.cpp</code>, <code>src/buzzer_control.cpp</code>, <code>src/od_log.cpp</code>, <code>src/diagnostics.cpp</code>, <code>src/config_parser.cpp</code>, <code>platformio.ini</code>. Task priorities and watchdog state were read from the installed cores at <code>~/.platformio/packages/framework-arduinoadafruitnrf52-seeed</code> and <code>framework-arduinoespressif32</code>, not inferred.</p>
+    <p>Timings quoted as measurements (the 15.98 s refresh, the 60 s SPI stall the RX ring is sized for) come from the repository's own notes and are attributed at the point of use. Everything else is a bound read off the code. No hardware was run for this report, and no code was changed.</p>
+  </footer>
+
+</div>
+
+<script type="module">
+  try {
+    const { default: mermaid } = await import("https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs");
+    mermaid.initialize({ startOnLoad: true, securityLevel: "loose" });
+  } catch (e) {
+    /* offline: leave the diagram source visible as preformatted text */
+    for (const el of document.querySelectorAll("pre.mermaid")) {
+      el.style.whiteSpace = "pre";
+      el.style.fontFamily = "var(--mono)";
+      el.style.fontSize = "11.5px";
+      el.style.color = "#46545F";
+    }
+  }
+</script>
+</body>
+</html>
