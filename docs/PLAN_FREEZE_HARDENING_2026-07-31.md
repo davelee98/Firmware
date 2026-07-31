@@ -436,7 +436,7 @@ already gone**, which only the first case satisfies.
 | Condition | `dropLink` | Phase |
 |---|---|---|
 | Disconnect event serviced: `s_disconnectCleanupPending && !epdRefreshInProgress && !ownerStillUp` | `false` | 2 |
-| `serviceBleIdleTimeout()`: connected `&& !transferActive() && bleMsSinceLastRx() > OD_BLE_IDLE_TIMEOUT_MS` | `true` | 3 |
+| `serviceBleIdleTimeout()`: connected `&& !epdRefreshInProgress && bleMsSinceLastRx() > OD_BLE_IDLE_TIMEOUT_MS` — **no** `transferActive()` gate, per CONNECTION_POLICY R4 | `true` | 3 |
 | Auth-abuse counter reaches its threshold, **after** the bounded TX barrier drains the `FE` or `OD_AUTH_ABUSE_FLUSH_MS` expires | `true` | 4 |
 
 **Explicitly not a caller: refusing a contender.** Admission calls
@@ -585,12 +585,20 @@ rather than ~10 s. That cost is smaller than it looks, and it differs by transpo
   the ESP32 analogue.
 - **Proactive idle drop — the sole reclaim mechanism.** Since admission never evicts,
   this is the *only* way a held slot is ever released short of the client leaving. A
-  loop-serviced `serviceBleIdleTimeout()`: if connected, `!transferActive()`, and
+  loop-serviced `serviceBleIdleTimeout()`: if connected, no refresh in progress, and
   `bleMsSinceLastRx() > OD_BLE_IDLE_TIMEOUT_MS`, drop via the seam +
   `abortToKnownState`. The BLE equivalent of LAN's `OD_LAN_READ_TIMEOUT_S`. An
-  `#ifndef`-guarded define in the file that services it, not a wire/config field. Same
-  `!transferActive()` gate; the from-START watchdog remains the backstop for a
-  transfer that progresses but never ends.
+  `#ifndef`-guarded define in the file that services it, not a wire/config field.
+
+  **There is no `!transferActive()` gate**, per
+  [CONNECTION_POLICY](CONNECTION_POLICY.md) R4, which supersedes an earlier draft of
+  this bullet. An in-flight transfer confers no protection: a client that goes silent
+  *during an upload* is precisely the case that wedges the device, and a transfer gate
+  would exempt exactly it. Idleness excludes only refresh-in-progress — and the
+  activity clock must be re-stamped when a refresh ends, since `loop()` is blocked
+  throughout one while wall-clock time passes. The from-START watchdog remains the
+  backstop for the remaining case: a transfer that keeps sending recognised commands
+  but never ends.
   - *The value is now load-bearing and is deliberately left unpinned here.* An earlier
     draft defaulted it to 60 s, chosen when evict-idle (~10 s) was the fast reclaim
     path and this was only a backstop. With eviction gone that reasoning no longer
@@ -801,17 +809,16 @@ criteria above, so they are no longer "risk").
   aggressive a value drops a client that was legitimately between commands. It is
   pinned against measured client behaviour rather than chosen, and it is the number to
   revisit first if field behaviour disappoints.
-- **A wedged transfer holds the slot for up to 15 minutes, and now has no escape
-  hatch.** Both the idle drop and (previously) eviction gate on `!transferActive()`, so
-  an incumbent that started a transfer and then stopped making progress is neither
-  dropped nor displaced until `TRANSFER_WATCHDOG_MS` fires. That is a consequence of
-  the from-START watchdog being a total-duration bound rather than a stall timeout —
-  identified in the ground truth above and not fixed by any phase here. Removing
-  eviction did not create this, but it did remove the one path that could have
-  short-circuited it, so it is recorded plainly. The fix is a genuine stall timeout
-  gating on *transfer active **and** progressing*, using the same activity clocks
-  Phase 2 and LAN already provide; it is a candidate for the next phase after this
-  plan, alongside the loop-liveness watchdog.
+- **A wedged transfer is now mostly caught, but not entirely.** CONNECTION_POLICY R4
+  removed the `!transferActive()` gate, so the common wedge — a client that starts a
+  transfer and *goes silent* — is dropped by the idle timeout like any other silent
+  client. What remains uncaught is narrower: a client that keeps sending recognised
+  commands while its transfer never completes. That one is still bounded only by
+  `TRANSFER_WATCHDOG_MS`, because the from-START watchdog is a total-duration bound
+  rather than a stall timeout. The full fix is a genuine stall timeout gating on
+  *transfer active **and** progressing*, using the same activity clocks Phase 2 and LAN
+  already provide; it is a candidate for the next phase after this plan, alongside the
+  loop-liveness watchdog.
 - **"Closed" depends on hardware nobody has run yet.** The verification model makes
   this explicit rather than papering over it: until the HIL scripts pass on both an
   nRF and an ESP32 board, every phase — including Phase 1 — is landed, not closed.
