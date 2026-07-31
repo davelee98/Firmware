@@ -11,6 +11,27 @@ behaviour is cited to `file:line` so a reviewer can re-check rather than trust.
 No wire-protocol change: every rule here is enforced at the transport/HCI layer or in
 firmware-local state. No new opcode, no new response code, no config-schema field.
 
+**Hard constraint — ONE command queue.** There is exactly one RX command ring and one
+TX ring, shared by all transports, and this policy must never introduce a per-connection
+one. The RX ring is `PIPE_MAX_W + 2` slots ([command_queue.h:63](../src/command_queue.h))
+— 18 or 34 depending on `PIPE_SMALL_DRAM_WINDOW` ([structs.h:46-54](../src/structs.h)) —
+at `OD_BLE_MAX_FRAME` = 256 B each, so ~4.7 KB or ~8.8 KB. Replicating it across three
+NimBLE connection slots would cost 14–26 KB on a device whose zlib window is 512 bytes.
+Not a trade worth discussing.
+
+This is not a constraint the policy merely tolerates; it is one the policy *enforces*.
+R3 requirement 1 drops a non-owner's write at the callback, before it reaches the ring,
+so only the owner's frames ever enter it — there is never a second client's traffic to
+separate, and therefore never a reason to partition. Callback-side filtering and the
+single queue are the same decision seen from two sides: without the filter you would be
+pushed toward per-connection buffering to keep streams apart. It also keeps
+`bleRxQueueDiscardTo(rxBoundary)` working unchanged — one ring, one boundary, one flush.
+
+Where this document calls for per-connection *state* (R2's instance identity, R3's
+event delivery), that state is **metadata only** — an epoch, a lifecycle state, an RX
+boundary; on the order of 8 bytes per slot. Nothing that holds frames is ever
+replicated per connection.
+
 > **Revision note.** This document was reviewed against the tree after its first
 > draft; that review found four defects that are corrected below and are called out
 > where they land, because each is a trap an implementer would otherwise re-enter:
@@ -157,21 +178,63 @@ having been made, and before `loop()` runs at all.
    ([ble_transport.h:81](../src/ble_transport.h)) carries a reason and an RX boundary
    but no handle, so this is a new transport requirement — *additional* to the
    handle-bearing connect event already planned.
-5. **Non-coalescing event delivery.** Connect and disconnect events are coalescing
-   booleans, and the header already records the weakness: "a second same-type event
-   arriving inside the check-then-clear window is lost"
-   ([ble_transport.h:66-71](../src/ble_transport.h)). Refusals manufacture
-   connect+disconnect pairs that would not otherwise exist, so what was a tolerable
-   pre-existing weakness becomes load-bearing. Events must preserve per-instance
-   identity.
+5. **Connection state must survive lost edges — via a table, not a queue.** See below.
 
-**Overflow is normative, not an implementation detail.** During a refresh, `loop()` is
-blocked for up to tens of seconds while ESP32 callbacks keep running, so contender
-churn is unbounded while the event queue is not. An implementation must therefore not
-*depend* on delivering every refused contender's events to the loop: requirements 1–3
-make a refused link inert in callback context, so losing its events is harmless. The
-queue must never drop an event belonging to the **owner**; state the queue's overflow
-behaviour explicitly and preserve owner events in preference to any other.
+#### Requirement 5 in detail: the instance table
+
+Connect and disconnect events are coalescing booleans today
+([ble_transport_esp32.cpp:33-34](../src/ble_transport_esp32.cpp),
+[:341-354](../src/ble_transport_esp32.cpp)), and the header records the weakness: "a
+second same-type event arriving inside the check-then-clear window is lost"
+([ble_transport.h:66-71](../src/ble_transport.h)). The side-band data —
+`s_disconnectReason`, `s_rxBoundaryAtDisconnect`, `s_connHandle` — is single-slot too,
+so each event overwrites the last.
+
+Today that is tolerable because `serviceBleEvents()` decides nothing per-connection: a
+connect means "reset `rebootFlag`, update MSD, tune the link," a disconnect means
+"flush the RX ring to the boundary, raise the cleanup flag"
+([main.cpp:461-500](../src/main.cpp)). Under this policy each event drives an
+*admission decision about a specific instance*, so a lost event is a lost decision:
+
+- **Lost connect → an unrefused contender.** Two centrals connect while `loop()` is
+  blocked in a refresh; the flag is set twice and read once. One is refused; the other
+  is connected, never evaluated, and invisible to the loop.
+- **Lost disconnect → the slot held by a ghost.** Owner disconnects, then a contender
+  connects and disconnects, all within one refresh block. The flag coalesces and the
+  side-band identity is the *last* writer's. The loop sees a disconnect that does not
+  match the owner, treats it as inert (7b row 5), and never releases the owner. Every
+  new client is refused until the idle timeout reclaims the slot — a device-wide
+  outage of one full timeout.
+
+**The mechanism is a fixed per-handle instance table, not an event queue.** Sized by
+the connection cap: 3 on every ESP32 target here (`CONFIG_BT_NIMBLE_MAX_CONNECTIONS`
+is 3 in the precompiled `sdkconfig.h` for S3/C3/C6, and absent for classic ESP32 so
+NimBLE's own `#ifndef` default of 3 applies), 1 on nRF. Each entry holds
+`(handle, epoch, state, rxBoundary, reason)` — metadata only, ~8 bytes, never frames
+(see the one-command-queue constraint above).
+
+Callbacks write their handle's entry. **The loop does not consume a stream of edges; it
+scans the table and compares it against its own notion of the owner.** That inverts the
+problem and dissolves the overflow question entirely:
+
+- **It cannot overflow.** State is bounded by the connection cap, not by event rate.
+  Contender churn overwrites entries for handles that are already gone. There is no
+  eviction policy to specify, because nothing is ever queued.
+- **Lost edges stop mattering.** A contender that connects and disconnects wholly
+  within a refresh block leaves no entry — correct, since there is nothing left to
+  refuse.
+- **Owner release is a comparison, not an event.** If the owner's `(handle, epoch)` is
+  no longer live in the table, the owner is gone, however many edges were missed. This
+  makes 7b rows 6 and 9 (stale epoch, duplicate disconnect) inert for free rather than
+  by explicit rule.
+- **Ghosts stay visible.** Any live entry that is not the owner is a contender still
+  needing refusal, and it remains visible until refused — so a missed refusal
+  self-corrects on the next pass instead of leaking a connection slot.
+
+*Search the table by handle rather than indexing by it.* NimBLE allocates handles from
+0 upward in practice, so direct indexing usually works, but a 3-entry linear search
+costs the same at this size and cannot be broken by a stack change that hands out
+sparse handles.
 
 nRF needs only requirement 4 in practice — `Bluefruit.begin(1, 0)` configures the
 SoftDevice for a single peripheral link ([ble_transport_nrf.cpp:164](../src/ble_transport_nrf.cpp)),
@@ -509,6 +572,13 @@ cover.
   wire header ([opendisplay_protocol.h:984](../include/opendisplay_protocol.h)) and is
   documented as a client-visible contract, so changing its *value* is a wire change and
   out of bounds here. Its *semantics* under R4 are firmware-local and in bounds.
+
+**Resolved since the first draft — event delivery.** The first draft required
+"non-coalescing event delivery" and left the queue's overflow behaviour as an open
+question. There is no queue: R3 requirement 5 now specifies a fixed per-handle instance
+table that the loop scans, so there is nothing to overflow and no eviction policy to
+decide. See also the one-command-queue constraint at the top of this document.
+
 **Resolved since the first draft:** `checkTransferTimeouts()` **does** route through
 `abortToKnownState(dropLink=true)`. R6 governs disconnects and the watchdog is not one,
 so this is an extension of R6's *teardown* to a non-disconnect trigger rather than a
