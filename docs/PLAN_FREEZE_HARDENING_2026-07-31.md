@@ -171,9 +171,14 @@ Confirmed missing or open-coded, i.e. what an abort must newly cover:
   exists, RX side).
 - `directWriteTouchSuspended` — reset only *inside* `cleanupDirectWriteState()`, so
   a teardown routed through the partial path can leave touch suspended.
-- Buzzer and LED — serviced each loop pass; **no** clean session-teardown stop API
-  exists, so Phase 2 must add idempotent `buzzerStop()` / `ledFlashStop()` rather
-  than assume a primitive is there.
+- Buzzer and LED — serviced each loop pass; no session-teardown stop API exists, and
+  **Phase 2 does not add one.** The abort deliberately leaves both running; see the
+  carve-out in `abortToKnownState` below. Both are bounded and self-terminating —
+  the buzzer's `outer` repeat count is a `uint8_t` coerced to at least 1 and playback
+  calls `buzzer_stop_internal()` at `rep >= outer`
+  ([buzzer_control.cpp:215-217,288-291](../src/buzzer_control.cpp)); the LED runs a
+  stepped pattern to completion ([device_control.cpp:530-541](../src/device_control.cpp)).
+  Neither can run forever, so neither is state a later connection can inherit.
 
 ---
 
@@ -401,14 +406,24 @@ WiFi). Ordered teardown:
 7. **new** `touchForceResume()` — asserts the suspend counter reached 0 and clears
    `directWriteTouchSuspended` even when teardown bypassed `cleanupDirectWriteState`.
    A new public idempotent API, not an existing primitive.
-8. **new** `buzzerStop()` / `ledFlashStop()` — new public idempotent stop APIs (see
-   ground truth: neither exists today).
-9. `clearEncryptionSession()` — **new on the disconnect path**; today crypto state
+8. `clearEncryptionSession()` — **new on the disconnect path**; today crypto state
    survives a link drop.
-10. **new** response-ring flush primitive (`bleTxQueueReset`), the RX-side analogue
-    of `bleRxQueueDiscardTo`.
-11. If `dropLink`: `ble.disconnect(currentHandle)` (the seam).
-12. `linkRelease(OWNER_BLE)` — the owner token defined above.
+9. **new** response-ring flush primitive (`bleTxQueueReset`), the RX-side analogue
+   of `bleRxQueueDiscardTo`.
+10. If `dropLink`: `ble.disconnect(currentHandle)` (the seam).
+11. `linkRelease(OWNER_BLE)` — the owner token defined above.
+
+**Buzzer and LED are NOT stopped — deliberately.** An earlier draft added
+`buzzerStop()` / `ledFlashStop()` as step 8. That is wrong: buzzer and LED are
+user-facing *effects*, not session state. A client that fires a buzz and immediately
+drops the link is a normal pattern — command, then disconnect to save power — and
+truncating the buzz mid-note defeats the command's entire purpose. Nothing about a
+playing melody corrupts or confuses a later connection, unlike a half-open pipe
+session, a suspended touch input, or a live crypto session. And because this policy
+fires the abort far more often than a plain disconnect once did (idle timeout,
+transfer watchdog, auth-abuse), the regression would be correspondingly more visible.
+Both are bounded and self-terminating (see ground truth), so leaving them running
+cannot wedge anything. The two stop APIs are therefore not added.
 
 **Panel power is NOT force-killed here — deliberately.** An earlier draft added an
 `epdSessionForceOff()` step "unless refreshing". That is wrong: `epdSessionForceOff()`
@@ -516,7 +531,7 @@ concurrently with a decrypt. No `nrfSessionClearPending` machinery.
 
 Disconnect mid-direct-write, mid-partial, mid-pipe, mid-chunked-config-write, and
 mid-refresh (WARM survives); assert every flagged state is clean afterward, touch is
-resumed, buzzer/LED stopped, crypto cleared, TX ring flushed; assert a second
+resumed, crypto cleared, TX ring flushed; assert a second
 transfer starts clean. On ESP32, a second central's writes are dropped at the callback
 while the token is held (mechanism check, before any Phase 3 policy). `bleMsSinceLastRx()`
 returns 0 before connect and grows only when queued frames stop arriving. Host-buildable
@@ -599,15 +614,27 @@ rather than ~10 s. That cost is smaller than it looks, and it differs by transpo
   throughout one while wall-clock time passes. The from-START watchdog remains the
   backstop for the remaining case: a transfer that keeps sending recognised commands
   but never ends.
-  - *The value is now load-bearing and is deliberately left unpinned here.* An earlier
-    draft defaulted it to 60 s, chosen when evict-idle (~10 s) was the fast reclaim
-    path and this was only a backstop. With eviction gone that reasoning no longer
-    applies: this timeout alone determines how long a returning client is locked out
-    by a stale-but-alive incumbent. 60 s is very likely too generous now, but the
-    right number follows from measured `py-opendisplay` behaviour — the longest
-    legitimate mid-session silence, which is the floor — not from picking a smaller
-    round number here. Pin it against that measurement before Phase 3 code lands, and
-    record the measurement in the comment on the define.
+  - *Default: `OD_BLE_IDLE_TIMEOUT_MS = 120000` (120 s).* Set deliberately generous,
+    and note this is **double** an earlier draft's 60 s — the reasoning inverted when
+    R4 landed, so the direction of the change is not an oversight:
+
+    - While the idle drop was gated on `!transferActive()`, the timeout could only
+      ever kill an *idle* client, so erring short was cheap and a shorter value
+      shortened the lockout.
+    - R4 removed that gate. The timeout can now terminate an **in-progress upload**
+      whose client has gone quiet, so erring short no longer costs a stale session —
+      it costs a legitimate transfer. Conservative is now the safer direction.
+
+    The cost is bounded and falls only on one case: a returning client waits up to
+    120 s if a stale-but-*alive* incumbent holds the slot. An incumbent that is
+    genuinely gone is reaped by the link layer in ~4–6 s (the firmware sets no
+    supervision timeout, so the central's negotiated value applies), so the 120 s
+    lockout never applies to a crashed or out-of-range client.
+
+    120 s is a *chosen* default, not a measured one. The measurement still matters,
+    but the question it answers has narrowed: not "what value" but "confirm no
+    legitimate `py-opendisplay` inter-command silence comes near 120 s." Record the
+    confirmation in the comment on the define.
   - *Why it cannot live where its LAN cousin does, and what that costs.*
     `OD_LAN_READ_TIMEOUT_S` is **not** a local tunable: it is defined at
     [opendisplay_protocol.h:984](../include/opendisplay_protocol.h) and documented at
@@ -758,7 +785,7 @@ The HIL scripts are the executable form of each Verification section, under
 | Phase | Script | Asserts |
 |---|---|---|
 | 1 (retroactive) | `test_nonce_gap.py` | a transfer survives a forced >256 forward counter gap; a nonce-dropped `0x0081` frame is repaired by the client's SACK path and the upload completes |
-| 2 | `test_abort_state.py` | disconnect mid-{direct, partial, pipe, chunked-config, refresh}; every flagged state clean afterward, touch resumed, buzzer/LED stopped, crypto cleared, TX flushed, WARM panel survives; a gatecrasher's writes are dropped at the callback while the token is held; `bleMsSinceLastRx()` is 0 pre-connect and ages only on true silence |
+| 2 | `test_abort_state.py` | disconnect mid-{direct, partial, pipe, chunked-config, refresh}; every flagged state clean afterward, touch resumed, crypto cleared, TX flushed, WARM panel survives; a buzzer melody and LED pattern in flight at the abort **keep playing to completion**; a gatecrasher's writes are dropped at the callback while the token is held; `bleMsSinceLastRx()` is 0 pre-connect and ages only on true silence |
 | 3 | `test_exclusivity.py` | two centrals against one ESP32 → second always refused, incumbent idle or transferring; a second LAN client is refused, not evicted, and the first's transfer survives; BLE⇄LAN arbitration both directions; refused-stranger disconnect does **not** tear down the incumbent (the `esp32-N4` no-WiFi path) |
 | 3 | `test_idle_drop.py` | a fresh silent client survives its first window then is dropped; a streaming client is not; a keepalive-sending client is not; the device returns to advertising after the drop |
 | 4 | `test_auth_abuse.py` | N unauthenticated BLE commands → drop at the threshold with `FE` delivered first; drop still occurs within the deadline if the client stops reading; a first-exchange auth is never dropped; the counter resets across a good command; LAN-TLS never increments it; on nRF the drop is not loop-starved |
@@ -802,13 +829,14 @@ criteria above, so they are no longer "risk").
   client-behaviour comment on each define, plus the
   client-side assertions, make the assumptions legible and drift-detectable, but the
   numbers are still judgement calls against a client that can change. The auth-abuse
-  drop is self-limiting (a wrongly-dropped client reconnects). The one that now
-  carries real weight is `OD_BLE_IDLE_TIMEOUT_MS`: with admission refusing rather than
-  evicting, it is the sole path by which a held slot is ever reclaimed, so too
-  generous a value locks out a returning client for its full duration and too
-  aggressive a value drops a client that was legitimately between commands. It is
-  pinned against measured client behaviour rather than chosen, and it is the number to
-  revisit first if field behaviour disappoints.
+  drop is self-limiting (a wrongly-dropped client reconnects). The one that carries
+  real weight is `OD_BLE_IDLE_TIMEOUT_MS` (120 s): with admission refusing rather than
+  evicting, it is the sole path by which a held slot is ever reclaimed, and with R4
+  removing the transfer gate it can also terminate a live upload. It is set generously
+  precisely because the second error is the worse one — but that trade is a judgement,
+  and it is the number to revisit first if field behaviour disappoints. The residual
+  exposure it accepts is a returning client waiting up to 120 s behind a
+  stale-but-alive incumbent.
 - **A wedged transfer is now mostly caught, but not entirely.** CONNECTION_POLICY R4
   removed the `!transferActive()` gate, so the common wedge — a client that starts a
   transfer and *goes silent* — is dropped by the idle timeout like any other silent

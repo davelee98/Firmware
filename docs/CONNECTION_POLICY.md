@@ -283,9 +283,16 @@ Consequences, stated because they are the cost of the rule:
 - A silent client mid-upload **is dropped** and its partial transfer discarded by R6's
   abort. Partial upload state is never preserved across a drop.
 - Any client whose legitimate inter-command gap can exceed the timeout will be dropped
-  mid-transfer. The timeout must be pinned against measured client behaviour — the
-  longest legitimate inter-command silence — not chosen as a round number. That
-  measurement is a prerequisite for implementation, not a follow-up.
+  mid-transfer.
+
+**Default: `OD_BLE_IDLE_TIMEOUT_MS = 120000` (120 s).** Set deliberately generous
+because this rule made the direction of that error worse: while the drop was gated on
+`!transferActive()` a short timeout only killed idle sessions, but with the gate gone
+a short timeout kills legitimate *uploads*. The cost of being generous is bounded and
+lands on one case only — a returning client waits up to 120 s if a stale-but-*alive*
+incumbent holds the slot. A client that is genuinely gone is reaped by the link layer
+in ~4–6 s (the firmware sets no supervision timeout, so the central's negotiated value
+applies), so the lockout never applies to a crashed or out-of-range peer.
 
 **What counts as activity.** A frame must reach the dispatcher and be **recognised as
 a command from the current owner**.
@@ -377,9 +384,20 @@ client-initiated, link-layer, or firmware-initiated — runs `abortToKnownState(
 leaving the device ready for a new connection.
 
 `abortToKnownState()` must leave, at minimum: no active direct-write, partial, pipe or
-chunked-config transfer; touch resumed; buzzer and LED stopped; encryption session
-cleared; RX and TX rings drained of the departed session's traffic; the owner token
-released. A WARM (post-refresh keep-alive) panel **survives** — the abort tears down
+chunked-config transfer; touch resumed; encryption session cleared; RX and TX rings
+drained of the departed session's traffic; the owner token released.
+
+**Buzzer and LED are explicitly NOT stopped.** They are user-facing *effects*, not
+session state. Firing a buzz and immediately dropping the link is a normal pattern —
+command, then disconnect to save power — and truncating it defeats the command. A
+playing melody cannot corrupt or confuse a later connection the way a half-open pipe
+session, a suspended touch input or a live crypto session can, and both are bounded
+and self-terminating: the buzzer's `outer` repeat count is a `uint8_t` coerced to at
+least 1, with playback stopping at `rep >= outer`
+([buzzer_control.cpp:215-217,288-291](../src/buzzer_control.cpp)); the LED runs a
+stepped pattern to completion ([device_control.cpp:530-541](../src/device_control.cpp)).
+Since this policy fires the abort far more often than a plain disconnect once did,
+stopping them would be a correspondingly more visible regression. A WARM (post-refresh keep-alive) panel **survives** — the abort tears down
 only a mid-transfer `PWR_ACTIVE` session, preserving the existing ACTIVE-only-teardown
 invariant ([main.cpp:411-415](../src/main.cpp)). It runs on the loop task, is
 idempotent, and is deferred while `epdRefreshInProgress`
@@ -395,9 +413,6 @@ idempotent, and is deferred while `epdRefreshInProgress`
      to bootloader ([device_control.cpp:847-866](../src/device_control.cpp)).
    - ESP32 DFU/reboot: BLE teardown then immediate restart
      ([device_control.cpp:880](../src/device_control.cpp)).
-   - Forced deep sleep: `enterDeepSleep(force=true)` deliberately bypasses the
-     `ble.isConnected()` guard ([main.cpp:780-795](../src/main.cpp)) and tears down the
-     stack.
    - Power-latch off ([device_control.cpp:942](../src/device_control.cpp)) — power can
      be physically removed before any teardown.
 
@@ -516,13 +531,26 @@ synchronously before the transition.
 |---|---|---|---|
 | 1 | nRF DFU entry | `Bluefruit.disconnect()` + 100 ms, then SoftDevice disable | Exempt (or sync abort) — MCU jumps to bootloader |
 | 2 | ESP32 DFU / reboot | BLE teardown, immediate restart | Exempt — MCU resets |
-| 3 | Forced deep sleep | `ble.end()`, stack down | Sync abort **recommended**: panel/peripheral state persists across sleep |
+| 3 | Deep sleep (forced or idle) | `ble.end()`, stack down | **Sync abort — required, not exempt.** Deep sleep is not a reset; state persists across it |
 | 4 | Power-latch off | Power removed | Exempt — nothing survives |
 
-Row 3 is the one that genuinely matters: deep sleep is not a reset, so buzzer, LED,
-touch-suspend and panel-power state survive it. Forced deep sleep also bypasses the
-live-link guard ([main.cpp:789](../src/main.cpp)) and does not currently arbitrate a
-LAN owner at all.
+**Row 3 is resolved: deep sleep calls `abortToKnownState()`.** It is the one terminal
+transition that is not a reset — touch-suspend, panel power and the owner token all
+survive it — so waking with a half-torn-down session is a real state, not a
+theoretical one. Forced deep sleep additionally bypasses the live-link guard
+([main.cpp:789](../src/main.cpp)) and does not arbitrate a LAN owner at all, so
+without the abort it can sleep straight through an owned slot.
+
+*Interaction with the buzzer/LED carve-out (R6).* The abort deliberately leaves buzzer
+and LED running, and deep sleep cuts the clocks they depend on — so at this one
+transition the "let the effect finish" rationale cannot hold, because the effect
+*cannot* finish. Note also that neither appears in the `workInFlight` gate
+([main.cpp:694-699](../src/main.cpp)), so today a melody does not hold off the idle
+path at all. Two consistent resolutions, and the choice is **open**: add buzzer/LED
+activity to the work gate so sleep waits for them to finish (consistent with the
+carve-out's reasoning), or silence them in the deep-sleep path specifically (not in
+the abort). Either way it is a *deep-sleep* responsibility, never an abort one. This
+is pre-existing behaviour, not a regression introduced here.
 
 ---
 
@@ -562,12 +590,14 @@ cover.
 
 ## Open questions
 
-- **The BLE idle timeout value.** Load-bearing under R3+R4: the only way a held slot is
-  reclaimed, and with R4 removing the transfer gate it also bounds how long a stalled
-  upload holds the device. Pin against measured `py-opendisplay` inter-command silence
-  before implementation.
+- **Confirm 120 s clears real client behaviour.** The BLE idle timeout is set
+  (`OD_BLE_IDLE_TIMEOUT_MS = 120000`, see below), so this is a check rather than a
+  choice: verify no legitimate `py-opendisplay` inter-command silence approaches 120 s.
 - **The `DROPPING` deadline** (R3a row 11) — long enough to cover a normal supervision
   timeout, short enough that a failed drop does not wedge the slot.
+- **Deep sleep vs the buzzer/LED carve-out** (7e row 3) — whether sleep waits for a
+  playing effect via the work gate, or silences it in the deep-sleep path. Not an
+  abort concern either way.
 - **Whether LAN's 30 s satisfies R4 unchanged.** `OD_LAN_READ_TIMEOUT_S` lives in the
   wire header ([opendisplay_protocol.h:984](../include/opendisplay_protocol.h)) and is
   documented as a client-visible contract, so changing its *value* is a wire change and
