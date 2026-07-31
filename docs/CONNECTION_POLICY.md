@@ -52,8 +52,9 @@ matching disconnect. Identified by `(transport, handle, epoch)`; see R2.
 **Refused** — a connection instance the firmware has decided not to admit. It may be
 physically established for a short time while being torn down. It is never the owner.
 
-**Owner state** — `NONE`, `ACTIVE` (admitted and serviceable), or `DROPPING`
-(firmware has requested termination; the link may still be physically up). See R3a.
+**Owner state** — `NONE` or `ACTIVE` (admitted and serviceable). There is no
+intermediate "dropping" state: a firmware-initiated drop waits synchronously for the
+link to go down before releasing. See R3a.
 
 **Inbound command** — a frame from the owner that reaches the dispatcher and is
 recognised as a command. Not merely bytes; not merely a queued buffer. See R4.
@@ -242,27 +243,60 @@ so cross-central injection is unreachable at the link layer. Its write callback 
 discards the handle it is given ([ble_transport_nrf.cpp:148](../src/ble_transport_nrf.cpp)),
 which is latent rather than live.
 
-### R3a — Owner lifecycle: a requested drop is not a completed drop
+### R3a — A firmware-initiated drop waits for the link to go down
 
-**A firmware-initiated disconnect moves the owner to `DROPPING`, not to `NONE`. The
-slot is released only when the matching disconnect event arrives.**
+**The drop is synchronous: the seam requests termination, then waits — cooperatively
+and with a bound — until the link is actually down, before the abort releases the
+slot.**
 
-> This corrects a first-draft error: the idle-timeout row released the owner in the
-> same step as requesting the disconnect.
+> This corrects a first-draft error in two stages. The first draft released the owner
+> in the same step as *requesting* the disconnect. The correction introduced a
+> `DROPPING` owner state and a cross-pass state machine. That was then investigated
+> against the tree and found to be more machinery than the problem needs — see below.
 
 A BLE disconnect is asynchronous. `NimBLEServer::disconnect()` returning true means
 termination was *requested* — it returns true even for `BLE_HS_ENOTCONN`/`EALREADY`
 (`NimBLEServer.cpp:321-332`). Releasing the token at request time would let a new
-connection be admitted while the old link is still physically up, so the old client's
-writes and its eventual disconnect event would land against the *new* session,
-violating both R1 and R3.
+connection be admitted while the old link is still physically up.
 
-While `DROPPING`: refuse all contenders, filter the departing owner's writes as
-non-owner, and do not admit. On the matching disconnect event, run R6's abort and go to
-`NONE`. **A bounded escape is required**: if no disconnect event arrives within a
-stated deadline, force the transition to `NONE` (and, on ESP32, retry the disconnect
-once) rather than wedging the slot permanently — otherwise a failed drop is
-indistinguishable from a permanently held slot.
+**Why synchronous, and why it needs no `DROPPING` state.** Three properties of the
+current tree make the simple form correct:
+
+- **Link-down is directly pollable, without consuming the event.**
+  `connectedCount()` reads the stack's own count on both targets —
+  `s_server->getConnectedCount()` ([ble_transport_esp32.cpp:257-259](../src/ble_transport_esp32.cpp))
+  and `Bluefruit.connected()` ([ble_transport_nrf.cpp:235-239](../src/ble_transport_nrf.cpp)) —
+  so the wait observes the link dropping while leaving the disconnect event queued for
+  `serviceBleEvents()` to consume normally. The RX-boundary capture and the existing
+  disconnect path are untouched.
+- **`idleDelay()` is already the right wait primitive.** It early-outs on
+  `ble.eventPending()` ([main.cpp:749](../src/main.cpp)), so it wakes promptly when the
+  disconnect lands, and it deliberately services *neither* RX nor transport events —
+  precisely the safety property wanted mid-teardown. The abort is loop-task-only and
+  already deferred while `epdRefreshInProgress` ([main.cpp:389](../src/main.cpp)), so
+  the wait can never land inside a refresh.
+- **R2's epoch already provides what `DROPPING` was providing.** If the bounded wait
+  expires and the slot is released with the old link still up, that link is inert *by
+  construction*: its writes are filtered as non-owner (R3 requirement 1) and its late
+  disconnect is inert on stale epoch (table 7b row 6). A stale link cannot reach the
+  new session. `DROPPING` was belt-and-braces over a guarantee R2 already makes.
+
+**Timing.** An alive peer terminates within a few connection intervals — tens of
+milliseconds; the firmware requests no interval, so the central's negotiated value
+applies. A peer that is already gone would cost the remainder of the supervision
+timeout, but such a peer is reaped by the link layer at ~4–6 s, far short of the 120 s
+idle timeout, so that case is effectively unreachable at the drop site.
+
+**The bound does not disappear — it relocates**, from "how long before we force-release
+a wedged token" to "how long we wait before proceeding anyway." It is far less
+load-bearing in the second form: expiry is not a failure needing recovery, just an
+early exit into an abort that was going to run regardless. Sizing it is an open
+question; it wants to cover a few connection intervals with margin, not a supervision
+timeout.
+
+**Phase 4 composes with this rather than fighting it.** The auth-abuse drop already
+requires a bounded cooperative wait before disconnecting, to deliver its final `FE`.
+Both are the same shape: cooperative wait, bounded, proceed on expiry.
 
 ### R4 — Each transport enforces an idle timeout, ungated by transfer state
 
@@ -439,7 +473,7 @@ discretion.
 | 5 | `ACTIVE BLE(h1,e1)` | LAN accept | **Refuse**: `incoming.stop()` | unchanged | no |
 | 6 | `ACTIVE LAN(0,e1)` | BLE connect `(h,e)` | **Refuse** `h` | unchanged | no |
 | 7 | `ACTIVE LAN(0,e1)` | LAN accept | **Refuse**: `incoming.stop()` | unchanged | no |
-| 8 | `DROPPING` | any | **Refuse** (R3a) | unchanged | no |
+| 8 | `ACTIVE`, drop in flight | any | **Refuse** — the slot is still held until the synchronous wait completes (R3a) | unchanged | no |
 
 Row 7 is a **behaviour change**: LAN accept is unconditional last-in-wins today
 ([wifi_service.cpp:869-877](../src/wifi_service.cpp)). It matters more than the BLE
@@ -454,7 +488,14 @@ or a second socket in the meantime. Consequently:
 - A second accept *during* the handshake is refused (rows 5/7 apply).
 - **TLS handshake failure is an owner disconnect** — it runs R6's abort and releases.
 - Handshake traffic is **not** activity for R4; the idle baseline starts at handshake
-  completion, and the handshake itself needs its own bounded deadline.
+  completion.
+- **A handshake deadline is deferred, not required.** An earlier draft required the
+  handshake carry its own bounded deadline. Deferred: a socket stuck mid-handshake is
+  already reclaimed by `OD_LAN_READ_TIMEOUT_S`, because the idle baseline does not
+  start until the handshake completes, so a handshake that never finishes leaves the
+  clock at its accept-time stamp and the existing 30 s drop fires. A dedicated
+  deadline would only tighten that window, which is not worth a second tunable until
+  something shows 30 s is too slow.
 
 Rows 3–8 are what make R1 true on ESP32, where the link layer will not. nRF enforces
 rows 3–4 at the link layer via `Bluefruit.begin(1, 0)`
@@ -470,30 +511,32 @@ whose full instance identity does not match the owner is inert.*
 |---|---|---|---|---|---|
 | 1 | `ACTIVE BLE(h1,e1)` | matches | Release; `abortToKnownState(dropLink=false)` | `NONE` | **yes** |
 | 2 | `ACTIVE LAN(0,e1)` | matches | Release; `abortToKnownState(dropLink=false)` | `NONE` | **yes** |
-| 3 | `DROPPING X` | matches | Release; abort (completes R3a) | `NONE` | **yes** |
-| 4 | `DROPPING X` | no match | Inert | unchanged | no |
-| 5 | any `ACTIVE` | refused contender `(BLE, h2, ·)` | Inert (R3) | unchanged | no |
-| 6 | `ACTIVE BLE(h1,e1)` | `(BLE, h1, e0)` — stale epoch | Inert — late event from a prior instance (R2) | unchanged | no |
-| 7 | `ACTIVE LAN` | any BLE identity | Inert (cross-transport) | unchanged | no |
-| 8 | `ACTIVE BLE` | any LAN identity | Inert (cross-transport) | unchanged | no |
-| 9 | any | duplicate of an already-consumed identity | Inert (idempotent) | unchanged | no |
-| 10 | `NONE` | any | No-op | `NONE` | no |
-| 11 | `DROPPING X` | none arrives before the deadline | Force release; abort; log WARN (R3a) | `NONE` | **yes** |
+| 3 | any `ACTIVE` | refused contender `(BLE, h2, ·)` | Inert (R3) | unchanged | no |
+| 4 | `ACTIVE BLE(h1,e1)` | `(BLE, h1, e0)` — stale epoch | Inert — late event from a prior instance (R2) | unchanged | no |
+| 5 | `ACTIVE LAN` | any BLE identity | Inert (cross-transport) | unchanged | no |
+| 6 | `ACTIVE BLE` | any LAN identity | Inert (cross-transport) | unchanged | no |
+| 7 | any | duplicate of an already-consumed identity | Inert (idempotent) | unchanged | no |
+| 8 | `NONE` | any | No-op | `NONE` | no |
+| 9 | `NONE` | the link a timed-out synchronous drop left up (R3a) | Inert — already released and aborted; the identity is stale by then | `NONE` | no |
 
-`dropLink=false` throughout: the link is already gone. Row 6 is the ABA case the epoch
+`dropLink=false` throughout: the link is already gone. Row 4 is the ABA case the epoch
 exists to catch, reachable in practice because a disconnect event can be serviced tens
 of seconds late when `loop()` was blocked in a refresh, by which time the handle may
 have been reissued.
+
+Rows 3–7 all collapse to the generic rule above; they are enumerated because each was a
+distinct hazard before the epoch made them uniform. Note there is no row for a
+firmware-initiated drop completing: R3a's synchronous wait means the release and abort
+have already happened inside the drop, so the event that follows is just row 9.
 
 #### 7c — Idle timeout
 
 | # | Owner | Refresh in progress | Inbound silence | Action | Abort? |
 |---|---|---|---|---|---|
-| 1 | `ACTIVE` | no | `>` timeout | Request drop via the seam; owner → `DROPPING` (R3a) | not yet — on the disconnect event (7b row 3) |
+| 1 | `ACTIVE` | no | `>` timeout | Drop via the seam, wait synchronously for link-down (R3a), then abort and release — all within the one pass | **yes** |
 | 2 | `ACTIVE` | no | `≤` timeout | Nothing | no |
 | 3 | `ACTIVE` | **yes** | any | Nothing — not idle by definition (R4); `endRefresh()` re-stamps the owner's clock | no |
-| 4 | `DROPPING` | any | any | Nothing — a drop is already in flight | no |
-| 5 | `NONE` | any | n/a | Nothing — no timer runs without an owner | no |
+| 4 | `NONE` | any | n/a | Nothing — no timer runs without an owner | no |
 
 Row 1 applies **whether or not a transfer is in flight** (R4).
 
@@ -582,8 +625,8 @@ Phase 3 on four points:
 - The plan requires handle-bearing *connect* events. **R3 additionally requires
   identity-bearing *disconnect* events, non-coalescing delivery, and callback-side
   subscribe/notify filtering.**
-- The plan releases the token when a drop is requested. **R3a requires a `DROPPING`
-  state and release only on the disconnect event.**
+- The plan releases the token when a drop is requested. **R3a requires the drop to wait
+  synchronously for link-down before releasing.**
 
 R5 (refresh watchdog) and R7e (terminal transitions) are new scope the plan does not
 cover.
@@ -593,8 +636,10 @@ cover.
 - **Confirm 120 s clears real client behaviour.** The BLE idle timeout is set
   (`OD_BLE_IDLE_TIMEOUT_MS = 120000`, see below), so this is a check rather than a
   choice: verify no legitimate `py-opendisplay` inter-command silence approaches 120 s.
-- **The `DROPPING` deadline** (R3a row 11) — long enough to cover a normal supervision
-  timeout, short enough that a failed drop does not wedge the slot.
+- **The R3a wait bound.** Now a wait bound rather than a recovery deadline, so much
+  less load-bearing: expiry is an early exit into an abort that runs regardless, and
+  R2's epoch makes the stale link inert. Wants to cover a few connection intervals with
+  margin — tens to low hundreds of milliseconds — not a supervision timeout.
 - **Deep sleep vs the buzzer/LED carve-out** (7e row 3) — whether sleep waits for a
   playing effect via the work gate, or silences it in the deep-sleep path. Not an
   abort concern either way.
