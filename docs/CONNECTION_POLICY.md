@@ -65,6 +65,15 @@ state.)
 > and execute in its session. The frame tag supersedes the RX-boundary mechanism
 > entirely.
 
+> **Fourth revision note (2026-07-31, closing the review).** The remaining findings,
+> corrected in place: table 7a modelled only one arrival at a time — rows 9–10 and
+> the admission-decided-once rule close it; the deep-sleep abort's rationale claimed
+> state survives sleep — RAM in one draft, hardware in the next, both false — and is
+> corrected at 7e row 3, where the abort now stands on teardown uniformity at a
+> mid-session exit; and the auth-abuse `FE` "delivery" is restated as
+> best-effort in the plan, since an empty TX ring proves stack acceptance of an
+> unacknowledged notification, not receipt.
+
 ---
 
 ## Definitions
@@ -79,7 +88,10 @@ physically established for a short time while being torn down. It is never the o
 
 **Owner state** — `NONE` or `ACTIVE` (admitted and serviceable). There is no
 intermediate "dropping" state: a firmware-initiated drop waits synchronously for the
-link to go down before releasing. See R3a.
+link to go down before releasing. See R3a. One further state exists on exactly one
+path: **`TERMINAL`**, entered by `linkMarkTerminal()` in the deep-sleep sequence
+(7e row 3) — admission permanently gated until wake reloads RAM. It is a one-way
+gate, not a lifecycle state: nothing transitions out of it.
 
 **Inbound command** — a frame from the owner that reaches the dispatcher and is
 recognised as a command. Not merely bytes; not merely a queued buffer. See R4.
@@ -176,7 +188,17 @@ connection instance," which is what every deferred consumer actually needs.
   callback the order is: allocate the epoch, publish the instance-table entry, then
   CAS — a successful claim never names an instance the loop cannot yet see. The epoch
   counter itself is `__atomic_fetch_add`, since BLE allocates on the host task and LAN
-  on the loop task.
+  on the loop task. One further reserved encoding, **`OWNER_TERMINAL`** — transport
+  code 0b11, reserved word `0xC0000000` in the `[31:30] transport | [29:16] handle |
+  [15:0] epoch` layout: `linkMarkTerminal()` exchanges the word to it unconditionally
+  and **returns the displaced owner identity** (possibly none), which is what the
+  terminal caller hands the abort to act for — after the exchange a fresh read of the
+  word yields terminal, not the departing owner. Claims succeed only against the
+  all-zero word, so admission is impossible from that point until a reset or wake
+  reloads RAM. `linkRelease` matches the *full* identity and never accepts the
+  terminal word as an argument, so the abort's release — called with the displaced
+  identity — is naturally inert and nothing can CAS the gate back to zero. This is
+  what lets a terminal transition run the ordinary abort unmodified (7e row 3).
 - **Scope is one boot.** Uniqueness across reset is not required and is not claimed:
   no deferred RAM state survives a reset.
 - **Wrap.** The epoch is **16 bits — a deliberate narrowing**, because the one-word
@@ -529,7 +551,7 @@ before the stamp is reached; the stamp's own identity test is one redundant comp
 > accepts any non-empty payload within the size cap
 > ([command_queue.cpp:50-93](../src/command_queue.cpp)) — including a one-byte
 > malformed frame or an unknown opcode, which the dispatcher only rejects later
-> ([communication.cpp:541](../src/communication.cpp)). Stamping on queue success
+> ([communication.cpp:544,754](../src/communication.cpp)). Stamping on queue success
 > leaves a garbage flooder able to hold the slot indefinitely, which is precisely the
 > failure the rule exists to prevent.
 
@@ -612,7 +634,10 @@ leaving the device ready for a new connection.
 
 `abortToKnownState()` must leave, at minimum: no active direct-write, partial, pipe or
 chunked-config transfer; touch resumed; encryption session cleared; RX and TX rings
-drained of the departed session's traffic; the owner token released. Both rings are
+drained of the departed session's traffic; the owner token released — except for the
+terminal caller (7e row 3), where the word was exchanged to `TERMINAL` before the
+abort and the release, called with the displaced identity, is deliberately inert:
+there the postcondition is "the slot is not claimable", which the gate satisfies. Both rings are
 drained by outright reset — sound because R3 requirement 1 means every frame in them
 passed the owner check when it was written — and a frame the departing owner writes
 *after* the reset, during R3a's wait, is covered by requirement 6's dispatch tag
@@ -672,6 +697,33 @@ discretion.
 | 6 | `ACTIVE LAN(0,e1)` | BLE connect `(h,e)` | **Refuse** `h` | unchanged | no |
 | 7 | `ACTIVE LAN(0,e1)` | LAN accept | **Refuse**: `incoming.stop()` | unchanged | no |
 | 8 | `ACTIVE`, drop in flight | any | **Refuse** — the slot is still held until the synchronous wait completes (R3a) | unchanged | no |
+| 9 | `NONE` | two or more connects/accepts race the free slot | The claim CAS serializes them: exactly one wins whatever tasks they arrive on; every loser is a contender, refused | `ACTIVE` (the CAS winner) | no |
+| 10 | `NONE` (just released) | a previously refused contender, link still up | **Stays refused** — admission is decided once, at the instance's own connect hook, and never revisited | `NONE` until a new instance connects | no |
+| 11 | `TERMINAL` (7e row 3) | any connect/accept | **Refuse** — the claim CAS fails against the terminal word; the stack is about to go down | `TERMINAL` | no |
+
+**Admission is decided exactly once per instance, at its connect hook — and never
+re-evaluated.** Rows 9 and 10 close a gap review found in this table, which modelled
+only one arrival at a time. The rule is the mechanical consequence of the CAS design
+made normative: an instance attempts the claim exactly once, in its own connect
+callback or accept, and there is no code path that retries it later. Three cases
+follow without further rules:
+
+- **Racing arrivals need no tiebreak.** Two connects during a blocked refresh, or a
+  BLE connect racing a LAN accept, are serialized by the word itself — the CAS winner
+  is the owner regardless of which task got there first or what order the loop later
+  scans the table (row 9). "BLE before LAN" was never a winner rule; see R7d.
+- **A freed slot is claimable only by instances that connect after the free.** A
+  contender that arrived while the slot was held lost its one CAS and is being
+  disconnected; it cannot inherit the slot however long its physical link lingers
+  (row 10). The client behind it simply reconnects, and its *new* instance claims.
+  This keeps R3 absolute — "a contender is always refused" has no asterisk for slots
+  that free up later — and it is what makes the loop's refusal scan order-free and
+  idempotent: re-refusing a doomed entry is always correct, admitting one never
+  happens there.
+- **The table scan never admits.** The loop's only admission-adjacent job is refusal
+  of CAS losers (R7d step 2); every claim happens at a hook. An implementation that
+  admits from the scan — e.g. "slot is free and this entry looks live, claim it for
+  them" — violates this table even when it happens to pick the right instance.
 
 Row 7 is a **behaviour change**: LAN accept is unconditional last-in-wins today
 ([wifi_service.cpp:869-877](../src/wifi_service.cpp)). It matters more than the BLE
@@ -780,15 +832,58 @@ synchronously before the transition.
 |---|---|---|---|
 | 1 | nRF DFU entry | `Bluefruit.disconnect()` + 100 ms, then SoftDevice disable | Exempt (or sync abort) — MCU jumps to bootloader |
 | 2 | ESP32 DFU / reboot | BLE teardown, immediate restart | Exempt — MCU resets |
-| 3 | Deep sleep (forced or idle) | `ble.end()`, stack down | **Sync abort — required, not exempt.** Deep sleep is not a reset; state persists across it |
+| 3 | Deep sleep (forced or idle) | `linkMarkTerminal()`, then sync abort, then `ble.end()` | **Sync abort — required, not exempt.** Not because state survives sleep (it does not; see below) but because sleep is a *mid-session exit* whose path otherwise hand-rolls a private teardown subset that drifts from the real one. The terminal gate must precede the abort — see the ordering trap below |
 | 4 | Power-latch off | Power removed | Exempt — nothing survives |
 
-**Row 3 is resolved: deep sleep calls `abortToKnownState()`.** It is the one terminal
-transition that is not a reset — touch-suspend, panel power and the owner token all
-survive it — so waking with a half-torn-down session is a real state, not a
-theoretical one. Forced deep sleep additionally bypasses the live-link guard
-([main.cpp:789](../src/main.cpp)) and does not arbitrate a LAN owner at all, so
-without the abort it can sleep straight through an owned slot.
+**Row 3 is resolved: deep sleep calls `abortToKnownState()`, and the reason is
+teardown uniformity at a mid-session exit — not surviving state.**
+
+> **Corrected rationale (review, twice).** An earlier revision justified this row
+> with "deep sleep is not a reset; touch-suspend, panel power and the owner token all
+> survive it." That is false: ESP32 deep-sleep wake re-enters `setup()` and reloads
+> RAM from the image — only `RTC_DATA_ATTR` state survives, as the boot code itself
+> records ([main.cpp:129-150](../src/main.cpp)) — so the owner token, the
+> touch-suspend counter and every transfer flag are rebuilt clean on wake. A second
+> attempt justified it with lingering *hardware* state instead; also wrong against
+> the tree: the sleep path already forces the panel rail off unconditionally before
+> sleeping ([main.cpp:812](../src/main.cpp), `epdSessionForceOff()` at
+> [display_service.cpp:420](../src/display_service.cpp)), touch is re-initialised on
+> wake ([main.cpp:238](../src/main.cpp)), and deep-sleep pad hold is enabled only for
+> the power-latch pin ([power_latch.cpp:59](../src/power_latch.cpp)).
+>
+> The real reason the abort is required: **deep sleep is a mid-session exit** —
+> forced sleep bypasses the live-link guard ([main.cpp:789](../src/main.cpp)) and the
+> path does not arbitrate a LAN owner, so it can begin with a transfer in flight —
+> and its path already hand-rolls a private teardown (panel force-off, advertising
+> stop, stack end, and now effect silencing). Without the abort, that private subset
+> must be kept in sync with the real teardown forever, and every session resource
+> added later must be added in both places — the same drift hazard that made the
+> transfer watchdog an abort caller. Routing the session half through
+> `abortToKnownState()` first makes sleep's teardown identical to every other
+> session end by construction.
+
+The division of labour is exact, and mirrors the buzzer/LED rule: the abort runs
+first and does *session* teardown only (ACTIVE-only panel handling, effects
+untouched); the sleep path then does its own *sleep* quiescing — panel force-off
+**including WARM** (no panel stays powered through sleep, which is why
+`epdSessionForceOff()` stays in the sleep path and must never move into the abort)
+and buzzer/LED silencing. The two compose; neither substitutes for the other.
+
+**One ordering trap, found by review: gate admission *before* the abort.** The
+abort's final step releases the token, deep sleep passes `dropLink=false`, and the
+owner's link can still be physically up — so between the release and `ble.end()`, a
+connect on the host task could win the freed word, and the new owner would then be
+destroyed by the stack teardown with no abort ever run for it. The deep-sleep path
+therefore calls **`linkMarkTerminal()`** (R2) — an unconditional atomic exchange of
+the owner word to the reserved `OWNER_TERMINAL` encoding, returning the displaced
+owner identity — *before* `abortToKnownState()`, and hands that displaced identity to
+the abort (after the exchange, reading the word yields terminal, not the departing
+owner, so the abort must not re-derive it). Claims fail against any nonzero word, so
+admission is impossible from that point; the abort's release, called with the
+displaced identity, finds the word not matching and is naturally inert; wake reloads
+RAM and the word starts clean. This also amends the plan's `dropLink=false` invariant: false means "no drop
+wanted from the abort", satisfied either because the link is already gone or because
+the stack is about to be torn down behind a terminal gate.
 
 *Interaction with the buzzer/LED carve-out (R6).* The abort deliberately leaves buzzer
 and LED running, and deep sleep cuts the clocks they depend on — so at this one

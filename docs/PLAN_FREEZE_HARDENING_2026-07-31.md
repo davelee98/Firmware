@@ -60,6 +60,17 @@ and R4's no-transfer-gate was reconciled in the previous revision.
 > out-param, and `bleRxQueueDiscardTo` all go — and the abort's step 9 now resets
 > both rings, not just TX.
 
+> **Revision 2026-07-31d (closing the review).** The remaining findings, corrected in
+> both documents: 7a gains rows 9–10 and the admission-decided-once rule (racing
+> arrivals are serialized by the claim CAS; a lingering refused contender never
+> inherits a freed slot); the deep-sleep abort's rationale is rewritten — neither RAM
+> nor hardware state survives in a way that needs it, so the abort stands on teardown
+> uniformity at a mid-session exit; the auth-abuse `FE` is best-effort (stack
+> acceptance plus a bounded negotiated-interval dwell, not guaranteed receipt); and
+> three miscited lines are fixed
+> (`sessionOrigin` stamps, dispatcher rejection sites, the Bluefruit `disconnect()`
+> signature).
+
 ## Phase map
 
 | # | Phase | Depends on | State today |
@@ -188,7 +199,7 @@ phases build on; each is cited so a reviewer can re-check rather than trust.
   ([wifi_service.cpp:871-877](../src/wifi_service.cpp)).
 - **BLE and LAN can both be live at once.** There is no connection-level
   arbitration. The only ownership is per-*transfer*: `sessionOrigin`, stamped at
-  transfer START ([display_service.cpp:2144-2146](../src/display_service.cpp)),
+  transfer START ([display_service.cpp:2159,2200,2712](../src/display_service.cpp)),
   enforced per-frame by `frameOwnsSession()` and per-disconnect by
   `serviceBleDisconnectCleanup()`.
 
@@ -203,7 +214,8 @@ phases build on; each is cited so a reviewer can re-check rather than trust.
   `Bluefruit.disconnect(Bluefruit.connHandle())`
   ([device_control.cpp:857](../src/device_control.cpp)), inside DFU entry, reaching
   past the abstraction into Bluefruit directly. **Bluefruit's public `disconnect()`
-  always sends reason 0x13 and ignores any argument** — a fact the seam design
+  takes only a handle and always sends reason 0x13 — there is no reason argument to
+  honour** — a fact the seam design
   below has to respect.
 
 ### No stall detection reaches a hung `loop()`
@@ -458,14 +470,21 @@ CONNECTION_POLICY R2 — an earlier draft of this plan used a `(transport, handl
 which R2 supersedes:
 
 ```
-enum LinkOwner { OWNER_NONE, OWNER_BLE, OWNER_LAN };
+enum LinkOwner { OWNER_NONE, OWNER_BLE, OWNER_LAN, OWNER_TERMINAL };
 struct LinkId { LinkOwner who; uint16_t handle; uint16_t epoch; };
 
-// The token itself is ONE 32-bit word: transport(2) | handle(14) | epoch(16).
-// All-zero == unowned; epoch 0 is never allocated.
+// The token itself is ONE 32-bit word: [31:30] transport | [29:16] handle | [15:0] epoch.
+// All-zero == unowned; epoch 0 is never allocated; 0xC0000000 (transport 0b11,
+// handle 0, epoch 0) == OWNER_TERMINAL, the deep-sleep admission gate.
 uint16_t linkNextEpoch(void);            // __atomic_fetch_add; connect callback, EVERY instance
 bool   linkClaim(LinkId id);             // one CAS on the word; safe from stack callbacks
-void   linkRelease(LinkId id);           // CAS holder -> NONE; loop task only, after R3a's wait
+void   linkRelease(LinkId id);           // CAS holder -> NONE; loop task only, after R3a's
+                                         // wait; full-identity match, so it can never zero
+                                         // the terminal word (and never accepts it as id)
+LinkId linkMarkTerminal(void);           // atomic exchange -> OWNER_TERMINAL, returning the
+                                         // DISPLACED owner identity (possibly NONE) — the
+                                         // identity the terminal caller hands the abort;
+                                         // deep-sleep path only, BEFORE the abort (R7e row 3)
 LinkId linkOwnerId(void);                // one atomic load; callable from ANY task
 bool   linkIsOwner(LinkId id);           // full-triple comparison; handle alone is never enough
 ```
@@ -690,7 +709,7 @@ the current owner**.
 > link. That argument does not hold: the queue accepts **any** non-empty payload within
 > the size cap ([command_queue.cpp:50-93](../src/command_queue.cpp)), including a
 > two-byte malformed frame or an unknown opcode, which the dispatcher only rejects later
-> ([communication.cpp:541](../src/communication.cpp)). Intake stamping rejects empty,
+> ([communication.cpp:544,754](../src/communication.cpp)). Intake stamping rejects empty,
 > oversized and ring-full frames and nothing else, so it leaves a flooder able to hold
 > the slot indefinitely — precisely the failure the idle drop exists to prevent.
 
@@ -780,11 +799,16 @@ A new client thus gets the full idle window before its first command. On LAN the
 baseline is **TLS handshake completion**, not TCP accept (R7a) — handshake traffic is not
 a command; see Phase 3.
 
-### `abortToKnownState(reason, bool dropLink)`
+### `abortToKnownState(reason, bool dropLink, LinkId ownerId)`
 
 New `src/session_guard.h/.cpp` (both targets; LAN parts under
 `#ifdef OPENDISPLAY_HAS_WIFI`, **not** `TARGET_ESP32` — `esp32-N4` is ESP32 without
-WiFi). Ordered teardown:
+WiFi). `ownerId` is the identity the abort acts for, and it is a **parameter, not a
+re-derivation**: ordinary callers pass a snapshot of `linkOwnerId()` taken before
+calling (or use a two-argument convenience overload that snapshots it); the terminal
+caller passes the identity `linkMarkTerminal()` displaced, because by then the word
+reads terminal and a re-derivation would act for the wrong identity. Steps 10 and 11
+below consume it. Ordered teardown:
 
 1. Log first (one line, the reason).
 2. Optional client NACK — **skip when `dropLink`** (the link is about to go).
@@ -877,22 +901,47 @@ is inactive, or made one.
 
 Collected here rather than left implicit across three phases, because the value of a
 single shared teardown routine depends entirely on every teardown actually reaching
-it. Three callers, and one governing invariant: **`dropLink=false` iff the link is
-already gone**, which only the first case satisfies.
+it. Three callers, and one governing invariant: **`dropLink=false` iff no drop is
+wanted from the abort — either the link is already gone (the disconnect-cleanup case)
+or the whole stack is about to be torn down with admission terminally gated (the
+deep-sleep case, via `linkMarkTerminal()` below)**.
 
 | Condition | `dropLink` | Phase |
 |---|---|---|
 | Disconnect event serviced: `s_disconnectCleanupPending && !epdRefreshInProgress && !ownerStillUp`, **and the event's identity matches the owner** (7b) | `false` | 2 |
-| Deep sleep, forced or idle — **synchronously, before `ble.end()`** (R7e row 3) | `false` | 2 |
+| Deep sleep, forced or idle — **after `linkMarkTerminal()`, before `ble.end()`** (R7e row 3) | `false` | 2 |
 | `serviceIdleTimeout()`: owned **by BLE** `&& !epdRefreshInProgress && linkMsSinceOwnerCommand() > OD_BLE_IDLE_TIMEOUT_MS` — **no** `transferActive()` gate, per R4 (LAN's reclaim is its own `OD_LAN_READ_TIMEOUT_S` path, per R4's per-transport rule) | `true` | 3 |
 | Auth-abuse counter reaches its threshold, **after** the bounded TX barrier drains the `FE` or `OD_AUTH_ABUSE_FLUSH_MS` expires | `true` | 4 |
 
-**Deep sleep is a caller, and it is the one terminal transition that is not a reset**
-(CONNECTION_POLICY R7e row 3). Touch-suspend, panel power and the owner token all survive
-it, so waking with a half-torn-down session is a real state rather than a theoretical one.
-Two specifics make it worse than it looks: forced deep sleep bypasses the live-link guard
-([main.cpp:789](../src/main.cpp)), and the path does not arbitrate a LAN owner at all — so
-without the abort it can sleep straight through an owned slot. `dropLink=false` because
+**Deep sleep is a caller — for teardown uniformity, not for surviving state**
+(CONNECTION_POLICY R7e row 3, which carries the twice-corrected rationale in full).
+*Earlier drafts justified this with state surviving sleep — RAM in one draft, hardware
+in the next; both false against the tree:* wake re-enters `setup()` with RAM reloaded,
+only `RTC_DATA_ATTR` survives ([main.cpp:129-150](../src/main.cpp)); and the sleep
+path already forces the panel off before sleeping ([main.cpp:812](../src/main.cpp))
+with touch re-initialised on wake ([main.cpp:238](../src/main.cpp)). The real reason:
+deep sleep is a **mid-session exit** — forced sleep bypasses the live-link guard
+([main.cpp:789](../src/main.cpp)) and the path does not arbitrate a LAN owner — whose
+path hand-rolls a private teardown subset (panel force-off, advertising stop, stack
+end, effect silencing). Routing the session half through the abort first makes sleep's
+teardown identical to every other session end by construction, instead of a parallel
+copy that every future session resource must be added to — the same anti-drift
+argument that made the transfer watchdog a caller. The sleep path keeps its own sleep
+quiescing on top: `epdSessionForceOff()` (WARM included — no panel sleeps powered;
+this call must never move into the abort) and the buzzer/LED silencing below.
+
+**Order: `linkMarkTerminal()` first, then the abort, then `ble.end()`** (the R7e row 3
+ordering trap). Without the gate, the abort's step 11 frees the word while the owner's
+link may still be up and advertising is still on — a connect on the host task could
+win the freed word in that window and the new owner would be destroyed by `ble.end()`
+with no abort ever run for it. With the word exchanged to `OWNER_TERMINAL` first,
+claims fail for the rest of the shutdown, and wake reloads RAM clean.
+`linkMarkTerminal()` **returns the displaced owner identity**, and that is the
+identity the sleep path hands the abort to act for — after the exchange,
+`linkOwnerId()` reads terminal, not the departing owner, so the abort must not
+re-derive it. Step 11's `linkRelease(displacedId)` then finds the word not matching
+and is naturally inert; `linkRelease` matches the full identity and never accepts the
+terminal word itself, so nothing can CAS the gate back to zero. `dropLink=false` because
 `ble.end()` takes the stack down immediately after; there is no link left to drop
 politely, and no loop pass will service the resulting event.
 
@@ -1150,7 +1199,11 @@ disagree the callback wins. Do not build correctness on step order alone.
   the next pass, where an event-driven version would leak the contender permanently.
   Because refusal is idempotent and inert, re-refusing an entry that is already tearing
   down costs nothing. nRF gets the same refusal free from `begin(1,0)`; this bullet is the
-  ESP32 analogue.
+  ESP32 analogue. **The scan never admits**: admission is one CAS at each instance's own
+  connect hook, decided once and never revisited (7a rows 9–10) — a contender whose
+  refusal is still pending when the slot frees stays refused, and the freed slot goes to
+  the next *new* instance. Racing arrivals, including a BLE connect against a LAN accept,
+  are serialized by the word, not by scan or loop order.
 
   **7a row 4 is the case to test.** A contender reusing the incumbent's handle after a
   stale link must be refused, and the *only* thing distinguishing it from the incumbent is
@@ -1312,7 +1365,9 @@ restructuring.)
 Admission (7a): two centrals against one ESP32, second always refused whatever the
 incumbent is doing; **row 4** — a contender reusing the incumbent's handle after a stale
 link is refused, which is the epoch's whole justification and the one case a
-handle-only implementation passes by accident; BLE⇄LAN arbitration both directions; a
+handle-only implementation passes by accident; **row 10** — a contender still connected
+when the incumbent departs is *not* admitted: it stays refused and the slot goes to the
+next fresh connect; BLE⇄LAN arbitration both directions; a
 second LAN client refused rather than evicted, with the first's transfer surviving.
 
 Refusal is inert (R3), the property most likely to be got wrong since refusal and
@@ -1362,17 +1417,35 @@ the placement.
   `communication.cpp` beside the auth gate that increments it, and
   `OD_AUTH_ABUSE_FLUSH_MS` beside the servicer that enforces it — not in a shared
   header.
-- **Deliver the final `FE` before dropping — with a real barrier, not one flush.**
-  The last `00 xx FE` must reach the client, or it is dropped with no reason. A single
-  `serviceBleTx()` then disconnect does **not** guarantee that: TX deliberately
+- **Best-effort delivery of the final `FE` before dropping — a real barrier, not one
+  flush, and honestly not a guarantee.** The last `00 xx FE` *should* reach the client
+  so it is not dropped without a stated reason. A single `serviceBleTx()` then
+  disconnect does not even get the frame to the stack reliably: TX deliberately
   retains an entry on mbuf backpressure or a missing CCCD
   ([command_queue.cpp:190](../src/command_queue.cpp)), and the final response may not
   even enqueue if the 10-slot ring is full. So the drop is gated on a bounded barrier:
   `serviceBleAuthAbuseDisconnect()` drains TX each loop pass and proceeds only once the
   TX ring has drained the `FE` **or** a bounded deadline (`OD_AUTH_ABUSE_FLUSH_MS`,
   ~500 ms) elapses — then it drops regardless, so a wedged/un-draining client cannot keep
-  the abuser attached. Then `abortToKnownState(dropLink=true)`, whose step 10 is itself
-  the R3a bounded wait for link-down before the token is released.
+  the abuser attached. **An empty ring proves stack acceptance, not receipt**: the ring
+  advances when `notify()` returns true ([command_queue.cpp:190-199](../src/command_queue.cpp)),
+  which means NimBLE queued an *unacknowledged* notification — nothing confirms it went
+  on air. So after the drain, the servicer dwells
+  `min(remaining deadline, one negotiated connection interval + margin)` before
+  dropping. The interval is the central's choice, not ours; today both targets read the
+  negotiated value only inside link-tune *logging*
+  ([ble_transport_esp32.cpp:74-77](../src/ble_transport_esp32.cpp),
+  [ble_transport_nrf.cpp:81](../src/ble_transport_nrf.cpp)) and `BleTransport` exposes
+  no accessor — so Phase 2's transport work adds one (`connIntervalMs(handle)`, or a
+  value published at the link-tune callback), with a conservative fallback
+  (`OD_AUTH_ABUSE_DWELL_FALLBACK_MS`, ~50 ms) for when no negotiated value has been
+  seen. **Any dwell truncated by the deadline — including to zero — is the best-effort
+  case and may forfeit the `FE`**; only a drain early enough for the full
+  interval-plus-margin dwell makes on-air delivery *expected* rather than hoped for.
+  That is as far as best-effort can go without an indication — a wire change this plan
+  is forbidden.
+  Then `abortToKnownState(dropLink=true)`, whose step 10 is itself the R3a bounded
+  wait for link-down before the token is released.
 
   **Two bounded waits in sequence, and they compose rather than conflict** — this is the
   shape CONNECTION_POLICY R3a predicts. The flush barrier runs *before* the abort because
@@ -1402,7 +1475,10 @@ authenticate are dropped by the counter.
 ### Verification
 
 A BLE peer sending N unauthenticated commands is dropped at the threshold with the
-`FE` delivered first (confirmed on a sniffer, since the barrier is the subtle part);
+`FE` observed **on air** first *when the drain and the full interval-plus-margin dwell
+both complete inside the deadline* (a sniffer, necessarily — ring state proves only
+stack acceptance, and the barrier is the subtle part); a deadline-truncated dwell may
+forfeit the `FE` by design;
 the drop still happens within the deadline if the client stops reading; a legitimate
 client authenticating on its first exchange is never dropped; the counter resets
 across a good command; **LAN-TLS traffic never increments it**; on nRF the drop is not
@@ -1429,9 +1505,9 @@ The HIL scripts are the executable form of each Verification section, under
 | 1 (retroactive) | `test_nonce_gap.py` | a transfer survives a forced >256 forward counter gap; a nonce-dropped `0x0081` frame is repaired by the client's SACK path and the upload completes |
 | 2 | `test_abort_state.py` | disconnect mid-{direct, partial, pipe, chunked-config, refresh}; every flagged state clean afterward, touch resumed, crypto cleared, both rings reset, WARM panel survives; a frame written by the departing owner during the teardown window never dispatches after release (the requirement-6 tag); a buzzer melody and LED pattern in flight at the abort **keep playing to completion**; deep sleep entered mid-transfer wakes with no residue (R7e row 3) and **silences a playing buzzer/LED without waiting for it** — with the pin confirmed quiet through sleep, not merely the state flag cleared; power-latch off still sounds its shutdown chirp; the drop holds the token until link-down (R3a) |
 | 2 | `test_link_isolation.py` | a gatecrasher's writes are dropped at the callback while the token is held; its subscribe does not move the incumbent's notify state; **it receives no notifications** — the live-leak fix, needs a second reader or a sniffer; `linkMsSinceOwnerCommand()` is 0 when unowned, ages on true silence, is **not** refreshed by malformed or unknown-opcode frames, and is re-stamped across a refresh; a stale-epoch frame left queued across a reconnect neither dispatches nor stamps the clock |
-| 3 | `test_exclusivity.py` | two centrals against one ESP32 → second always refused, incumbent idle or transferring; **7a row 4** — a contender reusing the incumbent's handle after a stale link is refused (the epoch case a handle-only build passes by accident); two connects coalesced inside one refresh block still end with both refused (the table-scan property); a second LAN client is refused, not evicted, and the first's transfer survives; BLE⇄LAN arbitration both directions; refused-stranger connect **and** disconnect do not tear down the incumbent (the `esp32-N4` no-WiFi path) |
+| 3 | `test_exclusivity.py` | two centrals against one ESP32 → second always refused, incumbent idle or transferring; **7a row 4** — a contender reusing the incumbent's handle after a stale link is refused (the epoch case a handle-only build passes by accident); **7a row 10** — a contender still connected when the incumbent departs stays refused, and the slot goes to the next fresh connect; two connects coalesced inside one refresh block still end with both refused (the table-scan property); a second LAN client is refused, not evicted, and the first's transfer survives; BLE⇄LAN arbitration both directions; refused-stranger connect **and** disconnect do not tear down the incumbent (the `esp32-N4` no-WiFi path) |
 | 3 | `test_idle_drop.py` | a fresh silent client survives its first window then is dropped; a streaming client is not; a keepalive-sending client is not; **a client silent mid-upload IS dropped** (the R4 case a transfer gate would exempt); a client engaged either side of a ~16 s refresh is not; a LAN flooder sending unrecognised bytes is dropped at 30 s despite the traffic; the device returns to advertising after the drop |
-| 4 | `test_auth_abuse.py` | N unauthenticated BLE commands → drop at the threshold with `FE` delivered first; drop still occurs within the deadline if the client stops reading; a first-exchange auth is never dropped; the counter resets across a good command; LAN-TLS never increments it; on nRF the drop is not loop-starved |
+| 4 | `test_auth_abuse.py` | N unauthenticated BLE commands → drop at the threshold with the `FE` on air first when the drain and full dwell complete inside the deadline (sniffer — ring state proves only stack acceptance); drop still occurs within the deadline if the client stops reading, forfeiting the `FE` by design; a first-exchange auth is never dropped; the counter resets across a good command; LAN-TLS never increments it; on nRF the drop is not loop-starved |
 
 **Threshold drift is caught in the client's CI, not ours.** These thresholds
 assume specific `py-opendisplay` behaviours (handshake authenticates
