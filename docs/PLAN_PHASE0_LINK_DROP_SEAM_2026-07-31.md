@@ -1,5 +1,28 @@
 # Phase 0 — BLE Link-Drop Seam (2026-07-31)
 
+> **SUPERSEDED 2026-07-31 — do not implement from this document.**
+>
+> Both deliverables were folded into **Phase 2 (BLE-HAL foundation)** of
+> [`PLAN_FREEZE_HARDENING_2026-07-31.md`](PLAN_FREEZE_HARDENING_2026-07-31.md), which
+> is the live plan. Read that instead; this file is kept only for the reasoning trail.
+>
+> Two things here are **out of date** and were corrected in the fold:
+>
+> - **The seam signature.** This document specifies `disconnect(uint8_t reason)`. The
+>   live plan specifies `disconnect(uint16_t handle)` with 0x13 hard-coded and *no*
+>   reason parameter. Both stacks were read to settle it: Bluefruit's
+>   `disconnect(uint16_t conn_hdl)` (`bluefruit.h:171`) has no reason parameter at all
+>   — it delegates to `sd_ble_gap_disconnect(_conn_hdl, BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION)`
+>   (`BLEConnection.cpp:206`) — and NimBLE already *defaults* its reason to 0x13
+>   (`NimBLEServer.h:66`). A handle is what both stacks genuinely take, and Phase 3's
+>   admission policy needs to drop a *specific* link, not "the current one".
+> - **The phase numbering.** References below to "Phases 2, 4 and 5" are the earlier
+>   five-phase draft. The live plan has four phases; the seam is in Phase 2.
+>
+> Deliverable 2 (the ESP32 disconnect-reason truncation fix) and the deferred
+> `OdDiscReason` classifier carried over unchanged, and now live in the live plan's
+> Phase 2 seam section.
+
 The foundational seam for [`PLAN_FREEZE_HARDENING_2026-07-31.md`](PLAN_FREEZE_HARDENING_2026-07-31.md).
 Phases 2, 4 and 5 all need to **drop a BLE link from the loop task**, and none can
 today. This phase adds that one capability, plus the minimal fix to stop the

@@ -1,8 +1,9 @@
 # Freeze-Hardening the OpenDisplay Firmware — 2026-07-31
 
 A self-contained four-phase plan for the BLE e-paper firmware, written from the code
-as it stands on `fix/nonce-replay-window` (tip `9ca1d8f`, rebased onto the squashed
-`main` at `aae5bdf`).
+as it stands on `fix/nonce-replay-window` (last code commit `9ca1d8f`, rebased onto the
+squashed `main` at `aae5bdf`; every commit after it on this branch is docs-only, so the
+citations below still describe the tree).
 
 Every claim below was verified by direct reading of the current tree and is cited to
 `file:line` so a reviewer can re-check rather than trust. The loop/BLE unification
@@ -188,7 +189,10 @@ Phase 3's admission needs to drop a *specific* link; pass the current handle for
 common case.
 
 - **ESP32:** `s_server->disconnect(handle, BLE_ERR_REM_USER_CONN_TERM)`. Return the
-  call's bool; log WARN on failure.
+  call's bool; log WARN on failure. Note the library already treats "the link is
+  gone" as success — `NimBLEServer::disconnect` returns `true` for `BLE_HS_ENOTCONN`,
+  `BLE_HS_EALREADY` and `UNK_CONN_ID` (`NimBLEServer.cpp:321-332`), so a WARN here
+  means a genuine failure, not a benign race with a client that left first.
 - **nRF:** `Bluefruit.disconnect(handle)`. Lift the pattern from
   [device_control.cpp:857](../src/device_control.cpp) but keep
   `restartOnDisconnect(true)` (unlike DFU, which disables it).
@@ -197,11 +201,47 @@ common case.
 must use a Core-Spec-legal `HCI_Disconnect` reason. `BLE_ERR_REM_USER_CONN_TERM`
 (**0x13**) is legal; `BLE_ERR_CONN_LIMIT` (0x09) is **not**, and the controller
 silently rejects it (0x12) — the gatecrasher stays connected while the code looks
-like it worked. The stacks are also asymmetric: NimBLE forwards the reason to
-`ble_gap_terminate`, but **Bluefruit's `disconnect()` ignores the argument and always
-sends 0x13**. So the seam exposes no `reason` parameter — 0x13 is the only value this
-plan wants and the only one nRF can send. Don't pretend nRF honours a reason it
-discards.
+like it worked. The stacks are asymmetric, and both were read rather than assumed:
+
+- NimBLE takes a reason and *defaults it to 0x13* —
+  `disconnect(uint16_t connHandle, uint8_t reason = BLE_ERR_REM_USER_CONN_TERM)`
+  (`NimBLEServer.h:66`), forwarded to `ble_gap_terminate`.
+- Bluefruit takes **only a handle** — `AdafruitBluefruit::disconnect(uint16_t conn_hdl)`
+  (`bluefruit.h:171`) delegates to `BLEConnection::disconnect(void)`, which calls
+  `sd_ble_gap_disconnect(_conn_hdl, BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION)`
+  (`BLEConnection.cpp:206`). There is no reason parameter to pass, let alone one to
+  honour.
+
+So the seam exposes no `reason` parameter: 0x13 is the only value this plan wants,
+the value NimBLE already defaults to, and the only value nRF can send. Both stacks
+do take a **handle**, which is what the seam's signature carries.
+
+**Also fix the inbound reason, which currently lies (ESP32).** Not a new feature —
+a correctness fix to what is already logged. `s_disconnectReason` is a `uint8_t`
+([ble_transport_esp32.cpp:35](../src/ble_transport_esp32.cpp)) assigned from
+NimBLE's `int reason` with a truncating cast (`:99`). NimBLE uses two ranges: HCI
+reasons wrapped as `BLE_HS_ERR_HCI_BASE + code` (`0x200 + code`), and host-layer
+`BLE_HS_E*` codes in `1..31`. The cast keeps only the low byte, so an HCI reason
+survives by luck (`0x213 & 0xFF == 0x13`) while `BLE_HS_ENOTCONN` (7) truncates to
+`0x07` and reads back as the unrelated HCI "memory capacity exceeded". The log at
+[main.cpp:472](../src/main.cpp) then prints it as decimal `%u`, so the two collide
+on screen as well as in storage. nRF is unaffected — it stores a raw HCI `uint8_t`
+from the SoftDevice with no wrapping ([ble_transport_nrf.cpp:38,135](../src/ble_transport_nrf.cpp)).
+
+Fix: widen `s_disconnectReason` and `takeDisconnectedEvent`'s out-param to
+`uint16_t` ([ble_transport.h:81](../src/ble_transport.h), one caller at
+[main.cpp:471](../src/main.cpp)), drop the cast, and log `0x%03X` so a wrapped HCI
+reason (`0x213`) and a host reason (`0x007`) are visibly distinct. No enum, no
+classifier — just stop discarding half the value.
+
+*Deferred, deliberately:* normalizing the inbound reason into an `OdDiscReason`
+enum (`SUCCESS / REMOTE / LOCAL / TIMEOUT / MIC_FAILURE / OTHER`). Nothing in
+Phases 2–4 branches on *why* a link dropped — the abort runs the same teardown
+regardless, and a self-initiated drop is identified by its `*DropPending` flag, not
+by reading the reason back. The classifier would feed a log line and nothing else.
+The likely first real consumer is MIC-failure handling (0x3D signals encryption
+desync); when that lands it is a small header and a `switch`, and the `uint16_t`
+raw value preserved here is exactly its input, so nothing above has to be redone.
 
 All disconnect calls are made from the **loop task** (a `serviceBleLinkDrop` hook, or
 inline in the loop-serviced helpers), never a stack callback — a callback that severs
@@ -384,6 +424,13 @@ while the token is held (mechanism check, before any Phase 3 policy). `bleMsSinc
 returns 0 before connect and grows only when queued frames stop arriving. Host-buildable
 parts of the token get a unit test on the `linkClaim`/`linkRelease` state machine.
 Build all envs.
+
+Two seam-specific bench checks that a build cannot cover. **The drop actually drops:**
+call the seam from the loop task on both nRF and ESP32 and confirm the link goes down
+on a scanner or the client — the 0x09 trap above is precisely a case where the code
+looks like it worked, so "it compiled" proves nothing. **The reason log is honest:** a
+real client disconnect logs a sensible HCI reason, and a NimBLE host-layer reason now
+logs as `0x0xx` rather than masquerading as an HCI code.
 
 ---
 
