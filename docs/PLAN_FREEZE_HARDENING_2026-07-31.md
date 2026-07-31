@@ -451,20 +451,46 @@ in which handle they act on.
 [encryption.cpp:261](../src/encryption.cpp) (session timeout) are crypto lifecycle,
 not session aborts; they stay as they are.
 
-**Unresolved: `checkTransferTimeouts()`.** The 15-minute watchdog
-([display_service.cpp:584-638](../src/display_service.cpp)) still runs its own
-open-coded teardown, and this plan cites *that very function* as the reason a single
-shared routine is needed. It is not on the list above, and the reason must be stated
-rather than left as an omission: the watchdog is **selective** (it kills one transfer
-half, not the session) and deliberately does **not** drop the link or clear crypto —
-the client is still connected and may legitimately retry, so routing it through an
-abort that calls `clearEncryptionSession()` would force re-auth on a healthy link.
-That is a behaviour change, not a refactor. Two honest options, to be decided before
-Phase 2 code lands: leave it separate and say so here, or factor steps 3–6 (the
-transfer-state subset, no crypto, no link) into a shared inner helper that both the
-watchdog and `abortToKnownState` call. The second preserves the anti-drift argument;
-the first is cheaper. Right now the plan implies the second while arguing for it and
-doing neither.
+**Resolved: `checkTransferTimeouts()` is a caller.** The 15-minute watchdog
+([display_service.cpp:584-638](../src/display_service.cpp)) routes its teardown through
+`abortToKnownState(dropLink=true)` and stops carrying its own. There is exactly one
+teardown routine, which is the whole point: this plan cites *that very function* as the
+reason a shared routine is needed, so exempting it would have argued for the routine
+while leaving the original drift source untouched.
+
+| Condition | `dropLink` | Phase |
+|---|---|---|
+| `checkTransferTimeouts()` fires on a direct-write or partial transfer past `TRANSFER_WATCHDOG_MS` | `true` | 2 |
+
+This is a **behaviour change**, deliberately taken, in three ways:
+
+1. **Crypto is now cleared.** The watchdog previously left the encryption session
+   intact. It no longer does.
+2. **The link is now dropped.** `dropLink=true` rather than `false`, which follows
+   from (1) rather than being an independent choice: once the session is cleared, a
+   retained link is a confusing state — the client's next command draws
+   `RESP_AUTH_REQUIRED` with no event to explain it, and under Phase 4 those refusals
+   feed the auth-abuse counter until the client happens to re-authenticate. A dropped
+   link is an unambiguous signal, it frees the exclusive slot (CONNECTION_POLICY R1)
+   from a demonstrably broken client, and it makes the watchdog's semantics identical
+   to the idle and auth-abuse drops. The client reconnects and restarts the transfer —
+   which it had to do anyway, since the transfer state is gone either way.
+3. **Teardown is no longer selective.** The two branches previously cleaned one
+   transfer half each; the abort clears all transfer state. Under one-client
+   exclusivity the halves are not independently owned, so this is a simplification
+   rather than a loss.
+
+The cost is that a legitimately slow-but-progressing transfer, cut off by the
+from-START duration bound, now also loses its link and session. That is acceptable
+because it must restart regardless, and because the real defect there is the
+duration-vs-stall bound itself, recorded under residual risk.
+
+**Not folded in: the orphaned-pipe healer.** The third branch of
+`checkTransferTimeouts()` (`pipeState.active && !pipeState.error && !directWriteActive
+&& !partialCtx.active` → `resetPipeWriteState()`) is an *invariant repair*, not a
+transfer timeout — it heals an internal inconsistency that should never arise. Dropping
+a healthy client's link and session over an internal bookkeeping error would be
+disproportionate. It stays as it is, and stays a plain `resetPipeWriteState()`.
 
 ### Wire `serviceBleDisconnectCleanup` through it
 

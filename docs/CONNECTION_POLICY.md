@@ -509,8 +509,10 @@ cover.
   wire header ([opendisplay_protocol.h:984](../include/opendisplay_protocol.h)) and is
   documented as a client-visible contract, so changing its *value* is a wire change and
   out of bounds here. Its *semantics* under R4 are firmware-local and in bounds.
-- **Whether `checkTransferTimeouts()` routes through `abortToKnownState()`.** It runs
-  its own open-coded teardown and deliberately neither drops the link nor clears
-  crypto, so routing it through wholesale would force re-auth on a healthy link. R6
-  governs *disconnects*, which the watchdog is not — but two teardown paths is the
-  drift the abort exists to prevent.
+**Resolved since the first draft:** `checkTransferTimeouts()` **does** route through
+`abortToKnownState(dropLink=true)`. R6 governs disconnects and the watchdog is not one,
+so this is an extension of R6's *teardown* to a non-disconnect trigger rather than a
+consequence of it: there is one teardown routine and the watchdog uses it. The
+rationale, the three behaviour changes it brings, and the one branch deliberately left
+out (the orphaned-pipe invariant repair) are recorded in the freeze-hardening plan's
+invocation set.
