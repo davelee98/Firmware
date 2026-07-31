@@ -27,6 +27,25 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Werror -O1 -fsanitize=undefined,address \
               tools/test_nonce_window.cpp -o /tmp/test_nonce_window
           /tmp/test_nonce_window
+      - name: Build and run the link-owner host test
+        # Run TWICE, under different sanitizers, because the two failure classes
+        # here need different tools and ASan/TSan cannot be combined:
+        #   ASan+UBSan - the single-threaded semantics (identity, epoch, terminal
+        #                gate, the wrap-safe activity clock)
+        #   TSan       - the concurrent claim and epoch-allocation paths, which
+        #                are genuinely cross-task in firmware (BLE claims on the
+        #                stack host task, LAN on the loop task)
+        # -I tools/hostshim supplies a minimal Arduino.h so the REAL src/od_log.h
+        # and src/link_owner.cpp compile unmodified on the host.
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -O1 -fsanitize=undefined,address \
+              -I tools/hostshim tools/test_link_owner.cpp src/link_owner.cpp \
+              -o /tmp/test_link_owner -pthread
+          /tmp/test_link_owner
+          g++ -std=c++17 -Wall -Wextra -Werror -O1 -fsanitize=thread,undefined \
+              -I tools/hostshim tools/test_link_owner.cpp src/link_owner.cpp \
+              -o /tmp/test_link_owner_tsan -pthread
+          /tmp/test_link_owner_tsan
 
   # The environment list lives in .github/firmware-targets.json, shared with
   # release.yml. Keeping one list means CI can't build a target the release
