@@ -587,13 +587,39 @@ without the abort it can sleep straight through an owned slot.
 *Interaction with the buzzer/LED carve-out (R6).* The abort deliberately leaves buzzer
 and LED running, and deep sleep cuts the clocks they depend on — so at this one
 transition the "let the effect finish" rationale cannot hold, because the effect
-*cannot* finish. Note also that neither appears in the `workInFlight` gate
-([main.cpp:694-699](../src/main.cpp)), so today a melody does not hold off the idle
-path at all. Two consistent resolutions, and the choice is **open**: add buzzer/LED
-activity to the work gate so sleep waits for them to finish (consistent with the
-carve-out's reasoning), or silence them in the deep-sleep path specifically (not in
-the abort). Either way it is a *deep-sleep* responsibility, never an abort one. This
-is pre-existing behaviour, not a regression introduced here.
+*cannot* finish.
+
+**Resolved: deep sleep silences both.** Of the two consistent options — make sleep
+*wait* for a playing effect via the `workInFlight` gate ([main.cpp:694-699](../src/main.cpp)),
+or *cut* the effect on the way down — this policy takes the second. Sleep is not delayed
+by a playing effect; the effect is stopped immediately before the MCU sleeps.
+
+The deciding argument is hardware state, not policy symmetry. `enterDeepSleep` runs
+`ble.stopAdvertising()` / `delay(200)` / `ble.end()` / `delay(100)` and then
+`armButtonWakeSources()` and `powerLatchHoldForSleep()`
+([main.cpp:806-836](../src/main.cpp)) — all outside `loop()`, so `buzzerService()` never
+ticks during it. A tone left sounding is therefore *not* a melody finishing gracefully:
+it is a driven pin held through the teardown and then into sleep, sounding continuously
+and drawing current until the next wake. Letting sleep wait would merely delay that;
+stopping is the only outcome that leaves the pins in the state sleep expects.
+
+**Three scoping rules this must not be over-generalised into:**
+
+1. **It lives in the deep-sleep path, never in `abortToKnownState`.** R6's carve-out is
+   unchanged: an idle, auth-abuse or watchdog drop still leaves a melody playing.
+2. **It applies to deep sleep only, not to every terminal transition.** In particular
+   **power-latch off (row 4) deliberately *plays* a chirp on the way down** —
+   `passiveBuzzerPowerOffAlert()` is called immediately before `powerLatchTriggerOff()`
+   ([device_control.cpp:83](../src/device_control.cpp)). A blanket "silence at every
+   terminal transition" would delete that alert.
+3. **Deep sleep is ESP32-only** (`enterDeepSleep` sits inside `#ifdef TARGET_ESP32`,
+   [main.cpp:757](../src/main.cpp)), so this adds no nRF obligation.
+
+*Implementation note.* Both stop routines exist but are file-static —
+`buzzer_stop_internal()` ([buzzer_control.cpp:147](../src/buzzer_control.cpp)) and
+`led_stop_internal(bool clear_mode)` ([device_control.cpp:347](../src/device_control.cpp)) —
+so this needs two thin public wrappers. They are *sleep* APIs, not session-teardown APIs,
+and nothing in the abort may call them.
 
 ---
 
@@ -616,37 +642,56 @@ Relative to the tree:
 7. No refresh start timestamp and no independent timebase exist for R5; the FastEPD
    refresh path has no timeout bound whatsoever.
 
-Relative to `PLAN_FREEZE_HARDENING_2026-07-31.md`, this document **supersedes** its
-Phase 3 on four points:
+**Relative to `PLAN_FREEZE_HARDENING_2026-07-31.md`: reconciled.** That plan was revised
+against this document and now schedules it rather than diverging from it; its
+"Conformance" table maps each rule to the phase that builds it. The four points this
+document previously superseded have been discharged in the plan — the `!transferActive()`
+gate removed (R4), the owner token given a per-instance epoch (R2), the callback boundary
+extended to identity-bearing *disconnect* events plus subscribe/notify filtering and the
+instance table (R3), and the drop made synchronous (R3a).
 
-- The plan gates its BLE idle drop on `!transferActive()`. **R4 removes that gate.**
-- The plan's owner token is a `(transport, handle)` pair. **R2 requires a per-instance
-  epoch.**
-- The plan requires handle-bearing *connect* events. **R3 additionally requires
-  identity-bearing *disconnect* events, non-coalescing delivery, and callback-side
-  subscribe/notify filtering.**
-- The plan releases the token when a drop is requested. **R3a requires the drop to wait
-  synchronously for link-down before releasing.**
+Two rules remain unscheduled and are named as such in the plan rather than absorbed:
+**R5** (refresh watchdog) is out of scope and recorded under its residual risk, with the
+unbounded FastEPD path called out; **R7e** (terminal transitions) is covered only for
+deep sleep, which the plan adds to its abort invocation set — the other three rows keep
+the exemption R6 grants them.
 
-R5 (refresh watchdog) and R7e (terminal transitions) are new scope the plan does not
-cover.
+This ordering does not change: where the two disagree, this document still wins.
 
 ## Open questions
 
-- **Confirm 120 s clears real client behaviour.** The BLE idle timeout is set
-  (`OD_BLE_IDLE_TIMEOUT_MS = 120000`, see below), so this is a check rather than a
-  choice: verify no legitimate `py-opendisplay` inter-command silence approaches 120 s.
-- **The R3a wait bound.** Now a wait bound rather than a recovery deadline, so much
-  less load-bearing: expiry is an early exit into an abort that runs regardless, and
-  R2's epoch makes the stale link inert. Wants to cover a few connection intervals with
-  margin — tens to low hundreds of milliseconds — not a supervision timeout.
-- **Deep sleep vs the buzzer/LED carve-out** (7e row 3) — whether sleep waits for a
-  playing effect via the work gate, or silences it in the deep-sleep path. Not an
-  abort concern either way.
-- **Whether LAN's 30 s satisfies R4 unchanged.** `OD_LAN_READ_TIMEOUT_S` lives in the
-  wire header ([opendisplay_protocol.h:984](../include/opendisplay_protocol.h)) and is
-  documented as a client-visible contract, so changing its *value* is a wire change and
-  out of bounds here. Its *semantics* under R4 are firmware-local and in bounds.
+- **The R3a wait bound** — the one unset number in this policy, and the least
+  load-bearing. It is a wait bound rather than a recovery deadline: expiry is an early
+  exit into an abort that runs regardless, and R2's epoch makes the stale link inert.
+  Wants to cover a few connection intervals with margin — tens to low hundreds of
+  milliseconds — not a supervision timeout. Everything else here is settled; this can be
+  picked at implementation time without reopening the policy.
+
+**Settled — the timeout values.** Both second-denominated timeouts are decided, and
+neither is gated on a measurement before implementation:
+
+- **BLE, `OD_BLE_IDLE_TIMEOUT_MS` = 120 s.** A chosen value, not a measured one, set
+  deliberately generous because R4 inverted the direction of the error: with the transfer
+  gate gone, erring short costs a legitimate upload rather than a stale session. The
+  accepted cost is a returning client waiting up to 120 s behind a stale-but-*alive*
+  incumbent; a client that is genuinely gone is reaped by the link layer at ~4–6 s, so
+  the lockout never applies to it.
+- **LAN, `OD_LAN_READ_TIMEOUT_S` = 30 s, unchanged.** It already satisfies R4's substance
+  — it is ungated by transfer state — so R4 changes only its *semantics*: stamp on a
+  recognised command rather than on raw bytes read, and exclude refresh. Its *value* is a
+  client-visible wire-header contract and is out of bounds here regardless.
+
+The asymmetry between them is deliberate and follows from where each is allowed to live.
+What remains is drift detection in `py-opendisplay`'s CI, not verification of the numbers
+— a client change that pushed legitimate inter-command silence toward either value would
+fail there.
+
+**Resolved — deep sleep vs the buzzer/LED carve-out** (7e row 3). Deep sleep **silences
+both**, in the deep-sleep path and never in the abort; sleep is not delayed by a playing
+effect. The rationale is hardware state — `buzzerService()` does not tick during
+`enterDeepSleep`, so a tone left on sounds continuously into sleep rather than finishing
+— and the scoping (abort unchanged, power-latch off keeps its chirp, ESP32-only) is
+recorded at 7e row 3.
 
 **Resolved since the first draft — event delivery.** The first draft required
 "non-coalescing event delivery" and left the queue's overflow behaviour as an open
