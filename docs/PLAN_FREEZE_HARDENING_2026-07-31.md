@@ -1,31 +1,34 @@
 # Freeze-Hardening the OpenDisplay Firmware — 2026-07-31
 
-A fresh five-phase plan for the BLE e-paper firmware, written from the code as it
-stands on `fix/nonce-replay-window` (tip `19335e6`, rebased onto the squashed
-`main` at `aae5bdf`). It **supersedes** `PLAN_FREEZE_PROOFING_2026-07-26.md`.
+A self-contained four-phase plan for the BLE e-paper firmware, written from the code
+as it stands on `fix/nonce-replay-window` (tip `9ca1d8f`, rebased onto the squashed
+`main` at `aae5bdf`).
 
-This plan does **not** assume that plan's design was correct. Every claim below
-was re-verified against the current tree; where the two disagree, this file wins,
-and the disagreement is called out. The loop/BLE unification (`#132`) and the
-nonce rewrite (this branch) both landed since the old plan was written, and both
-changed the ground it stood on.
+Every claim below was verified by direct reading of the current tree and is cited to
+`file:line` so a reviewer can re-check rather than trust. The loop/BLE unification
+(PR `#132`) and the nonce rewrite (this branch) both landed recently and changed the
+shape of several subsystems, so nothing here is taken on inherited assumption — the
+ground truth is re-established from scratch below.
 
 ## Phase map
 
 | # | Phase | Depends on | State today |
 |---|---|---|---|
 | 1 | Nonce / replay correctness | — | **Shipped** on this branch (`e2e95cd`…`19335e6`) |
-| 2 | Connection exclusivity / owner token | Phase 0 seam | Not started |
-| 3 | Abort-to-known-state / disconnect hardening | Phase 2 | Partially present (`serviceBleDisconnectCleanup`) |
-| 4 | Auth-abuse disconnect | Phase 0 seam | Prototype exists off-branch, not here |
-| 5 | Idle timer | Phase 0 seam | Not started |
+| 2 | BLE-HAL foundation: link-drop seam, owner token, handle-aware events, RX clock, abort-to-known-state | — | Partially present (`serviceBleDisconnectCleanup`) |
+| 3 | Connection-exclusivity **policy** + idle drop | Phase 2 | Not started |
+| 4 | Auth-abuse disconnect | Phase 2, Phase 3 | Prototype exists off-branch, not here |
 
-**Phase 0 (foundational, folded into Phase 2):** a portable
-`BleTransport::disconnect(reason)`. Phases 2, 4 and 5 all need to drop a link and
-none can today. Building it once, in the transport seam, is the spine of the whole
-plan — see Phase 2.
+**Phase order note.** Phase 2 is the foundational layer: every transport/HAL
+*mechanism* the later phases stand on — the portable `disconnect()`, the connection
+owner token, handle-bearing connect events with callback-side write filtering, the
+RX-activity clock, and the shared abort routine. Phase 3 is **policy** on top of those
+mechanisms (when to refuse, evict, or drop); Phase 4 is the auth-abuse policy. Phase 2
+lands first because 3 and 4 both call into it — building the foundation last (as an
+earlier draft did, with exclusivity as Phase 2) created a dependency cycle, since the
+idle drop calls the abort routine.
 
-**Two cross-phase deliverables** thread through Phases 2–5 and are specified once
+**Two cross-phase deliverables** thread through Phases 2–4 and are specified once
 here rather than repeated:
 
 - **`src/session_policy.h`** — every tunable threshold this plan introduces
@@ -33,7 +36,7 @@ here rather than repeated:
   compile-time and overridable per env, each with a comment naming the *client
   behaviour it assumes*. No threshold is a wire/config field, so none touches the
   hard constraint. The point is that the assumptions are collected and legible, not
-  scattered across four handlers as bare numbers.
+  scattered across handlers as bare numbers.
 - **A companion HIL test per phase**, under `tests/`, following the existing
   `tests/serial_stall_test.py` pattern (pytest driving a real board through
   `py-opendisplay`). These *are* the Verification sections — versioned with the
@@ -66,8 +69,8 @@ phases build on; each is cited so a reviewer can re-check rather than trust.
   precompiled `sdkconfig.h` wins). `onConnect`
   ([ble_transport_esp32.cpp:81-93](../src/ble_transport_esp32.cpp)) does **no**
   count check and **no** rejection; a second central's handle simply **overwrites**
-  `s_connHandle` (`:87`), and its writes land in the same RX ring undistinguished.
-  This is a live multi-central exposure, not a hypothetical.
+  the single scalar `s_connHandle` (`:87`), and its writes land in the same RX ring
+  undistinguished. This is a live multi-central exposure, not a hypothetical.
 - **LAN** is single-client, last-in-wins: a second TCP accept evicts the first
   ([wifi_service.cpp:871-877](../src/wifi_service.cpp)).
 - **BLE and LAN can both be live at once.** There is no connection-level
@@ -86,21 +89,24 @@ phases build on; each is cited so a reviewer can re-check rather than trust.
 - nRF has exactly one host-initiated disconnect in the whole firmware —
   `Bluefruit.disconnect(Bluefruit.connHandle())`
   ([device_control.cpp:857](../src/device_control.cpp)), inside DFU entry, reaching
-  past the abstraction into Bluefruit directly.
+  past the abstraction into Bluefruit directly. **Bluefruit's public `disconnect()`
+  always sends reason 0x13 and ignores any argument** — a fact the seam design
+  below has to respect.
 
 ### No stall detection reaches a hung `loop()`
 
 - nRF has **no watchdog at all** ("every fault handler is `b .`",
   [od_log.h:40](../src/od_log.h)).
-- ESP32's TWDT is armed (`CONFIG_FREERTOS_WATCHDOG_TIMEOUT_S=120`) but nothing
-  subscribes `loop()` to it, and because `loop()` always yields (`delay()` →
-  `vTaskDelay`) the IDLE task feeds it — so a `loop()` blocked inside a
-  non-yielding operation (a ~16 s EPD refresh) is **not** caught.
+- ESP32's `loop()` is **not** subscribed to the task WDT: Arduino leaves
+  `loopTaskWDTEnabled = false` and nothing here calls `esp_task_wdt_add()` for the
+  loop task, so `loop()` is unsupervised. (Whatever `CONFIG_FREERTOS_WATCHDOG_TIMEOUT_S`
+  is set to is immaterial — no framework code arms a loop watchdog from it.)
 - The only wall-clock teardown is `checkTransferTimeouts()`
-  ([display_service.cpp:584-638](../src/display_service.cpp)), and it measures from
-  transfer **START**, not from last progress — 15 minutes
-  (`TRANSFER_WATCHDOG_MS = 900000`). A transfer dribbling one byte every 14
-  minutes is never caught.
+  ([display_service.cpp:584-638](../src/display_service.cpp)), and it measures total
+  elapsed from transfer **START** — 15 minutes (`TRANSFER_WATCHDOG_MS = 900000`). It
+  is a total-duration bound, **not** a stall/inactivity timeout: a transfer that
+  stalls at minute 1 is still not torn down until minute 15, and a slow-but-
+  progressing transfer is cut off at 15 minutes regardless of progress.
 
 ### An idle connected client is never dropped
 
@@ -115,13 +121,15 @@ phases build on; each is cited so a reviewer can re-check rather than trust.
 - There is **no** BLE idle link-drop. LAN has one (`OD_LAN_READ_TIMEOUT_S = 30`,
   [wifi_service.cpp:952](../src/wifi_service.cpp)); BLE has no equivalent.
 
-### State with no disconnect-time reset (Phase 3 surface)
+### State with no disconnect-time reset (Phase 2 surface)
 
 Confirmed missing or open-coded, i.e. what an abort must newly cover:
 
 - `encryptionSession` — **not** cleared on BLE disconnect. Crypto state survives a
-  link drop. `clearEncryptionSession()` runs only on session-timeout-at-command or
-  a new auth.
+  link drop. `clearEncryptionSession()` runs on session-timeout-at-command, a new
+  auth, config reload ([communication.cpp:66](../src/communication.cpp)), and LAN
+  teardown ([wifi_service.cpp:798,874](../src/wifi_service.cpp)) — but no BLE
+  disconnect path is among them.
 - `chunkedWriteState` (config chunked upload,
   [config_parser.h:47](../src/config_parser.h)) — **no reset function**; cleared
   only by open-coded inline assignments in `communication.cpp`, untouched by
@@ -130,58 +138,74 @@ Confirmed missing or open-coded, i.e. what an abort must newly cover:
   exists, RX side).
 - `directWriteTouchSuspended` — reset only *inside* `cleanupDirectWriteState()`, so
   a teardown routed through the partial path can leave touch suspended.
+- Buzzer and LED — serviced each loop pass; **no** clean session-teardown stop API
+  exists, so Phase 2 must add idempotent `buzzerStop()` / `ledFlashStop()` rather
+  than assume a primitive is there.
 
 ---
 
 ## Phase 1 — Nonce / replay correctness  ✅ SHIPPED
 
-Shipped on this branch. Ground truth is
-[`PLAN_PHASE1_NONCE_REPLAY_2026-07-26.md`](PLAN_PHASE1_NONCE_REPLAY_2026-07-26.md),
-including its **Reversal of Decision A** (the forward cap was removed in `aef3a6b`;
-comparison is numeric, not modular).
+Shipped on this branch (`e2e95cd`…`19335e6`), recorded here for completeness. What
+landed:
+
+- The AES-CCM anti-replay state moved from a 512 B ring of raw counter values to a
+  32 B sliding bitmap (`src/nonce_window.h`, a dependency-free pure state machine).
+- Check split from commit: `nonceCheck()` decides and writes nothing; `nonceCommit()`
+  runs only *after* the CCM tag verifies. So packet loss is no longer counted as
+  tampering, and an unauthenticated peer cannot advance replay state.
+- The forward-distance cap was **removed** and comparison made numeric, not modular:
+  a counter ahead of `last_seen` is accepted at any distance (the tag is the gate),
+  which fixed a cliff where a forward gap past the cap stranded the session
+  unrecoverably. A consumed counter is still never re-accepted (`last_seen` only
+  moves up; below it, bitmap-caught or rejected on width).
 
 **Verified:** host suite 47,445 checks under `-Werror`+ASan/UBSan (and 1,635
 failures against the pre-change code, proving the tests discriminate);
 `nrf52840custom`, `esp32-c3-N16`, `esp32-N4` build.
-**Not verified:** the entire hardware matrix, unchanged from the Phase 1 doc.
+**Not verified:** the entire hardware matrix.
 
-Nothing in Phase 1 is reopened here. The one carry-forward is that the **auth-abuse
-disconnect** the old plan pulled into Phase 1 is **not on this branch** — it lives
-on `feat/nonce-replay-and-auth-guard` and is redesigned fresh as Phase 4.
+Nothing in Phase 1 is reopened here. One carry-forward: an **auth-abuse disconnect**
+was prototyped alongside the nonce work on a separate branch
+(`feat/nonce-replay-and-auth-guard`) but is **not** on this branch, and is redesigned
+fresh as Phase 4.
 
 ---
 
-## Phase 2 — Connection exclusivity / owner token
+## Phase 2 — BLE-HAL foundation (mechanisms)
 
-**Goal:** at most one owning session at a time, chosen deterministically, on every
-transport and target. Close the ESP32 multi-central hole and the BLE/LAN
-double-ownership hole.
+**Goal:** every transport/HAL *mechanism* the later phases build on — the portable
+link-drop seam, the connection owner token, handle-aware connect events with
+callback-side write filtering, the RX-activity clock, and the idempotent
+abort-to-known-state routine. No *policy* lives here (Phase 3 decides when to refuse,
+evict, or drop); Phase 2 only makes each action possible and each fact observable.
 
-### Phase 0 seam (do this first) — `BleTransport::disconnect(uint8_t reason)`
+### The link-drop seam — `BleTransport::disconnect(uint16_t handle)`
 
-The single most reused piece in the plan. Add to the abstraction
-([ble_transport.h](../src/ble_transport.h)) and implement per target:
+Add to the abstraction ([ble_transport.h](../src/ble_transport.h)) and implement per
+target. It takes an explicit **handle**, not just "the current connection", because
+Phase 3's admission needs to drop a *specific* link; pass the current handle for the
+common case.
 
-- **ESP32:** `s_server->disconnect(s_connHandle, reason)` when `s_connHandle !=
-  BLE_HS_CONN_HANDLE_NONE`. Return the call's bool; log WARN on failure.
-- **nRF:** `Bluefruit.disconnect(s_connHandle)` when `s_connHandle !=
-  BLE_CONN_HANDLE_INVALID`. Lift the pattern from
+- **ESP32:** `s_server->disconnect(handle, BLE_ERR_REM_USER_CONN_TERM)`. Return the
+  call's bool; log WARN on failure.
+- **nRF:** `Bluefruit.disconnect(handle)`. Lift the pattern from
   [device_control.cpp:857](../src/device_control.cpp) but keep
   `restartOnDisconnect(true)` (unlike DFU, which disables it).
 
-**Reason code correctness — the trap the old plan flagged and it still applies.**
-A host-initiated disconnect must use a reason in the Core Spec's legal
-`HCI_Disconnect` allowlist. `BLE_ERR_REM_USER_CONN_TERM` (**0x13**) is legal;
-`BLE_ERR_CONN_LIMIT` (0x09) is **not**, and a controller silently rejects it (0x12)
-leaving the gatecrasher connected while the code looks like it worked. Neither
-constant appears in `src/` today (verified), so this is introduced clean. Use
-0x13, check the return, and cover it with a comment naming why 0x09 is wrong.
+**Reason fixed at 0x13, and the seam hard-codes it.** A host-initiated disconnect
+must use a Core-Spec-legal `HCI_Disconnect` reason. `BLE_ERR_REM_USER_CONN_TERM`
+(**0x13**) is legal; `BLE_ERR_CONN_LIMIT` (0x09) is **not**, and the controller
+silently rejects it (0x12) — the gatecrasher stays connected while the code looks
+like it worked. The stacks are also asymmetric: NimBLE forwards the reason to
+`ble_gap_terminate`, but **Bluefruit's `disconnect()` ignores the argument and always
+sends 0x13**. So the seam exposes no `reason` parameter — 0x13 is the only value this
+plan wants and the only one nRF can send. Don't pretend nRF honours a reason it
+discards.
 
-All disconnect calls are made from the **loop task** (a new `serviceBleLinkDrop`
-hook, or inline in the loop-serviced helpers below), never from a stack callback —
-the copy-and-flag contract the unified loop relies on
-([main.cpp](../src/main.cpp) `serviceBle*` helpers). A callback that severs its own
-link mid-dispatch is exactly the class of bug `#132` removed.
+All disconnect calls are made from the **loop task** (a `serviceBleLinkDrop` hook, or
+inline in the loop-serviced helpers), never a stack callback — a callback that severs
+its own link mid-dispatch is exactly the class of bug `#132` removed.
 
 ### Owner token
 
@@ -190,68 +214,110 @@ A tiny arbiter, one new translation unit (`src/link_owner.h/.cpp`) or folded int
 
 ```
 enum LinkOwner { OWNER_NONE, OWNER_BLE, OWNER_LAN };
-bool linkClaim(LinkOwner who);   // succeeds iff OWNER_NONE or already `who`
-void linkRelease(LinkOwner who); // no-op if `who` is not the holder
+bool linkClaim(LinkOwner who, uint16_t handle);  // succeeds iff OWNER_NONE or (who,handle) matches
+void linkRelease(LinkOwner who);                 // no-op if `who` is not the holder
 LinkOwner linkOwner(void);
+uint16_t  linkOwnerHandle(void);                 // valid only when linkOwner()==OWNER_BLE
 ```
 
-Single writer (loop task), so a plain `LinkOwner` global suffices — no locking, per
-the same argument that lets `g_commandOrigin` be a bare global
+The token is **connection-level**: at most one transport-and-link owns the session at
+a time. `OWNER_LAN` needs no handle (a single TCP client); `OWNER_BLE` **does** — the
+enum alone cannot distinguish two BLE centrals, so the claim carries the conn handle
+and the arbiter records it. This recorded handle is the authoritative "who owns the
+link", separate from the transport's `s_connHandle` scalar, which the newest connect
+always overwrites.
+
+Phase 2 establishes only the *mechanism and the baseline*: the first BLE connect
+claims `OWNER_BLE` with its handle; disconnect releases it (wired into `abort` below).
+Deciding what to do with a *second* contender — refuse, or evict an idle incumbent —
+is Phase 3 policy. Single writer (loop task), so plain globals suffice — no locking,
+per the same argument that lets `g_commandOrigin` be a bare global
 ([communication.cpp:30-36](../src/communication.cpp)).
 
-### Enforcement
+### Handle-aware connect events + callback-side write filtering
 
-- **ESP32 BLE admission.** On the connect event
-  ([main.cpp](../src/main.cpp) `serviceBleEvents` connect branch), if a session is
-  already owned by a *different* live link, **refuse** the newcomer:
-  `ble.disconnect(0x13)`. Capture the refused handle so the ensuing disconnect
-  event does **not** raise `s_disconnectCleanupPending` for it — otherwise refusing
-  a stranger tears down the incumbent's transfer (a new remote DoS). This is the
-  ESP32 analogue of what nRF gets free from `begin(1,0)`.
-- **Evict-idle preference.** Refusing outright strands a returning client when the
-  incumbent link lingers after an abrupt loss (supervision timeout 4–32 s). So:
-  if the incumbent has `!transferActive()` and last RX older than a threshold
-  (~10 s), evict it (`ble.disconnect(0x13)` on the old handle) and accept the new
-  one; refuse only when the incumbent is actively transferring. `transferActive()`
-  already exists and already excludes a fatally-NACKed pipe
-  ([display_service.cpp](../src/display_service.cpp)).
-- **LAN.** `handleWiFiServer` accept
-  ([wifi_service.cpp:869-895](../src/wifi_service.cpp)) already evicts the previous
-  TCP client; gate it on `linkClaim(OWNER_LAN)` and, symmetrically, refuse/evict a
-  LAN accept while BLE actively owns a transfer.
-- **Release** on the owning transport's disconnect (BLE disconnect cleanup; LAN
-  `disconnectWiFiServer`).
+Two transport changes that the current HAL cannot express, needed before any
+admission policy can run:
 
-### Divergences from the old plan
+- **Handle-bearing connect event.** Today `takeConnectedEvent()` returns only a bool
+  ([ble_transport_esp32.cpp:341](../src/ble_transport_esp32.cpp)) and connect/disconnect
+  events are coalescing booleans, so two connects before loop() lose an event and
+  loop() cannot tell which handle arrived. Change the event to carry the connecting
+  handle, so loop() (Phase 3) can act on a specific newcomer.
+- **Callback-side write filtering.** The ESP32 write callback compares
+  `connInfo.getConnHandle()` against `linkOwnerHandle()` and **drops a non-owner's
+  write at the callback**, before it enters the shared RX ring. This is a mechanism,
+  not policy, and it is required: with the token claimed by the incumbent, a second
+  central's writes are ignored *immediately* — even during a ~16 s blocked loop, when
+  loop-side refusal has not run yet and the gatecrasher could otherwise inject a full
+  transfer's worth of commands. So Phase 2 alone already neutralises the multi-central
+  injection hole; Phase 3 only adds the cleaner active disconnect + evict-idle. nRF
+  needs no filter (one central, hardware-enforced).
 
-- The old plan's Phase 4 assumed the ESP32 cap could be forced to 1 via a build
-  flag; it can't (precompiled `sdkconfig.h`). Exclusivity must be enforced in the
-  connect handler, as above.
-- `serviceBleDisconnectCleanup`'s `ownerStillUp` guard is **already** unconditional
-  (not inside `#ifdef OPENDISPLAY_HAS_WIFI`) — the old plan listed making it so as
-  work; `#132` already did it ([main.cpp:404-409](../src/main.cpp)). Phase 2 only
-  adds the token, not that restructuring.
+### The RX-activity clock (BLE HAL)
 
-### Verification
+Phase 3's idle drop needs to know how long a link has been *silent*, but this is HAL
+infrastructure, so Phase 2 owns it. Today's `lastActivityMs` cannot serve:
+`connCount > 0` re-stamps it every pass ([main.cpp:366](../src/main.cpp)), so a
+live-but-quiet link never ages.
 
-Two centrals against one ESP32 (second refused or incumbent evicted per rule);
-BLE-then-LAN and LAN-then-BLE both arbitrated; refused-stranger disconnect does not
-tear down the incumbent (the `esp32-N4` no-WiFi path specifically). Host-buildable
-parts of the arbiter get a unit test on the `linkClaim`/`linkRelease` state
-machine.
+The clock belongs to the BLE HAL's RX intake: `bleRxQueuePush()`
+([command_queue.cpp:50](../src/command_queue.cpp)) is the single point every inbound
+frame passes through on both targets. That function lives in `command_queue.cpp`, so
+the storage lives there too (a transport file-static cannot be reached from it); the
+transport exposes the accessor:
 
----
+```
+uint32_t bleMsSinceLastRx(void);   // 0 when not connected — see the init rule below
+```
 
-## Phase 3 — Abort-to-known-state / disconnect hardening
+**Stamp only a frame that was actually queued.** `bleRxQueuePush()` already returns
+`false` for an empty / oversized / ring-full frame; stamp `s_lastRxMs` **only on the
+`true` path**. This is load-bearing, not tidiness: if malformed or saturating writes
+refreshed the clock, an unauthenticated peer could hold the link open forever with
+garbage that never authenticates and never reaches the auth-abuse counter (Phase 4).
+Stamping only real, queued frames means such a flooder either sends valid commands —
+caught by Phase 4 — or sends droppable garbage that never refreshes the clock, so
+Phase 3's idle drop fires.
 
-**Goal:** one idempotent routine that returns the device to a known-idle state from
-*any* session, and close the reset-surface gaps found above.
+**Written on the BLE callback task.** `bleRxQueuePush()` runs from the write callback
+— the NimBLE host task on ESP32, the Bluefruit callback task on nRF (and, under the
+`rtos_malloc`-failure inline fallback, the SoftDevice task). Not the loop task. So it
+is a genuine cross-task field:
+
+- `static uint32_t s_lastRxMs`, accessed with `__atomic_store_n` / `__atomic_load_n`
+  (`__ATOMIC_RELAXED`) — the discipline the RX ring in this same file already uses
+  ([command_queue.cpp:62,92](../src/command_queue.cpp)). Plain `volatile` is **not**
+  a correct inter-task tool in C++ and is not used here; the deferred/inline-fallback
+  callback paths can even run on two different tasks, which relaxed atomics handle
+  cleanly (monotonic last-writer-wins, no torn word) and `volatile` does not.
+- `millis()` is safe in these callback contexts (ESP32: `esp_timer_get_time`,
+  ISR-safe; nRF: `xTaskGetTickCount`, and the fallback runs on the event task, not a
+  hardware ISR).
+
+Stamping at intake rather than at loop-side observation (watching `bleRxQueueHead()`
+advance) matters: the loop can sit inside a ~16 s EPD refresh, so a loop-side stamp
+would record when loop() *drained* the frame, not when it was queued — inflating
+"silence" by whatever the loop was blocked on. Intake time is close enough to arrival
+(a deferred callback adds sub-ms).
+
+**Idle is measured from the later of connect and last RX** — the init fix. A naive
+"`UINT32_MAX` until first RX" would make a freshly connected, still-silent client
+instantly past any timeout. So the transport also records connect time (`s_connectMs`,
+set on the connect event) and:
+
+```
+bleMsSinceLastRx() := millis() - max(s_connectMs, s_lastRxMs)   // 0 when not connected
+```
+
+A new client thus gets the full idle window before its first command, and the clock
+resets to connect time on every reconnect.
 
 ### `abortToKnownState(reason, bool dropLink)`
 
 New `src/session_guard.h/.cpp` (both targets; LAN parts under
 `#ifdef OPENDISPLAY_HAS_WIFI`, **not** `TARGET_ESP32` — `esp32-N4` is ESP32 without
-WiFi). Ordered teardown, each step already having a primitive except where noted:
+WiFi). Ordered teardown:
 
 1. Log first (one line, the reason).
 2. Optional client NACK — **skip when `dropLink`** (the link is about to go).
@@ -260,18 +326,30 @@ WiFi). Ordered teardown, each step already having a primitive except where noted
 5. `resetPipeWriteState()`.
 6. **new** `resetChunkedWriteState()` — a real primitive replacing the open-coded
    inline clears in `communication.cpp`; call it here and from those sites.
-7. **new** touch force-resume that asserts the suspend counter reached 0 and clears
-   `directWriteTouchSuspended` even when teardown bypassed
-   `cleanupDirectWriteState`.
-8. Buzzer/LED stop.
-9. `epdSessionForceOff()` **only if** `!epdRefreshInProgress` (a WARM post-refresh
-   panel survives, unchanged).
-10. `clearEncryptionSession()` — **new on the disconnect path**; today crypto state
-    survives a link drop.
-11. **new** response-ring flush primitive (`bleTxQueueReset`), the RX-side analogue
+7. **new** `touchForceResume()` — asserts the suspend counter reached 0 and clears
+   `directWriteTouchSuspended` even when teardown bypassed `cleanupDirectWriteState`.
+   A new public idempotent API, not an existing primitive.
+8. **new** `buzzerStop()` / `ledFlashStop()` — new public idempotent stop APIs (see
+   ground truth: neither exists today).
+9. `clearEncryptionSession()` — **new on the disconnect path**; today crypto state
+   survives a link drop.
+10. **new** response-ring flush primitive (`bleTxQueueReset`), the RX-side analogue
     of `bleRxQueueDiscardTo`.
-12. If `dropLink`: `ble.disconnect(0x13)` (Phase 0 seam).
-13. `linkRelease()` (Phase 2).
+11. If `dropLink`: `ble.disconnect(currentHandle)` (the seam).
+12. `linkRelease(OWNER_BLE)` — the owner token defined above.
+
+**Panel power is NOT force-killed here — deliberately.** An earlier draft added an
+`epdSessionForceOff()` step "unless refreshing". That is wrong: `epdSessionForceOff()`
+powers off every state except `PWR_OFF`, **including `PWR_WARM`** (the only early
+return is `if (pwrmgmState == PWR_OFF) return`,
+[display_service.cpp:420-421](../src/display_service.cpp)) — a disconnect during a
+refresh is deferred, so by the time abort runs the panel can be WARM with
+`epdRefreshInProgress` false, and the step would kill exactly the panel that must
+survive. Panel power is handled correctly by steps 3–5: `cleanupDirectWriteState`
+forces off only a `PWR_ACTIVE` (mid-transfer) session and no-ops on WARM, matching
+the existing "ACTIVE-only teardown" invariant in `serviceBleDisconnectCleanup`. So a
+WARM keep-alive panel survives an abort — including an auth-abuse or idle drop of a
+client while the panel is warm from a prior push.
 
 Idempotent and loop-task-only: every step is either already a no-op when its state
 is inactive, or made one.
@@ -279,34 +357,110 @@ is inactive, or made one.
 ### Wire `serviceBleDisconnectCleanup` through it
 
 `serviceBleDisconnectCleanup` ([main.cpp:388-423](../src/main.cpp)) already defers
-correctly and already checks `ownerStillUp`. Phase 3 routes its teardown body
-through `abortToKnownState(..., dropLink=false)` (the link is already gone) so the
-disconnect path and the abort path can never drift — the old plan's split between
-them is exactly how the direct-write watchdog once tore down a panel while leaving
-its pipe session live (a bug this branch already fixed in `checkTransferTimeouts`).
+correctly and already checks `ownerStillUp`. Phase 2 routes its teardown body through
+`abortToKnownState(..., dropLink=false)` (the link is already gone) so the disconnect
+path and the abort path can never drift. Keeping two separate teardown paths is
+exactly how the direct-write watchdog once tore down a panel while leaving its pipe
+session live — a bug this branch already fixed in `checkTransferTimeouts`, and one a
+single shared routine prevents from recurring.
 
-### nRF deferred session clear
-
-The `clearEncryptionSession()` added at step 10 must be **deferred** on nRF, not run
-in the disconnect callback: a `memset(session_key)` landing mid-`aes_ccm_decrypt` on
-Bluefruit's inline-fallback path (callback runs on the BLE task under heap pressure)
-is a real race. Set `nrfSessionClearPending`, service from `loop()` when the
-in-flight depth is 0 — the same copy-and-flag discipline as every other
-loop-serviced BLE helper.
+**No special nRF deferral is needed for the session clear.** An earlier draft called
+for deferring `clearEncryptionSession()` on nRF to avoid a `memset(session_key)`
+racing an inline `aes_ccm_decrypt`. That race does not exist in the current
+architecture: nRF's write callback only *enqueues*
+([ble_transport_nrf.cpp:148-156](../src/ble_transport_nrf.cpp)); all decrypt and
+dispatch happen on the loop task in `serviceBleRx()`
+([main.cpp:513](../src/main.cpp)), and `serviceBleDisconnectCleanup` is already
+loop-task. The abort — session clear included — runs on the loop task, never
+concurrently with a decrypt. No `nrfSessionClearPending` machinery.
 
 ### Verification
 
 Disconnect mid-direct-write, mid-partial, mid-pipe, mid-chunked-config-write, and
-mid-refresh (WARM survives); assert every flagged state is clean afterward and touch
-is resumed; assert a second transfer starts clean. Build all envs.
+mid-refresh (WARM survives); assert every flagged state is clean afterward, touch is
+resumed, buzzer/LED stopped, crypto cleared, TX ring flushed; assert a second
+transfer starts clean. On ESP32, a second central's writes are dropped at the callback
+while the token is held (mechanism check, before any Phase 3 policy). `bleMsSinceLastRx()`
+returns 0 before connect and grows only when queued frames stop arriving. Host-buildable
+parts of the token get a unit test on the `linkClaim`/`linkRelease` state machine.
+Build all envs.
+
+---
+
+## Phase 3 — Connection-exclusivity policy + idle drop
+
+**Goal:** the *policy* on top of Phase 2's mechanisms — decide, per event, whether a
+contender is refused or an incumbent evicted, and drop a link that has gone silent.
+Phase 2 already makes a second BLE central harmless (its writes are filtered, it
+cannot own the token); Phase 3 makes it *clean* (actively disconnected, with an
+evict-idle path for legitimate reconnects) and closes the idle-link hole. It consumes
+the owner token, the handle-bearing connect event, and `bleMsSinceLastRx()` — all
+Phase 2 — and adds no new transport state.
+
+### Enforcement
+
+- **ESP32 admission (refuse / evict).** On a handle-bearing connect event, if the
+  token is held by a *different* BLE handle, decide by the incumbent's state:
+  - incumbent `transferActive()` → **refuse** the newcomer: `ble.disconnect(newHandle)`,
+    and do **not** raise `s_disconnectCleanupPending` or `linkRelease()` for it — the
+    incumbent's session is untouched. (Never interrupt a live transfer.)
+  - incumbent idle and `bleMsSinceLastRx()` **≥** the evict-idle threshold (~10 s) →
+    **evict** the incumbent (`ble.disconnect(incumbentHandle)` + `abortToKnownState`,
+    which releases the token), then let the newcomer claim it.
+  - incumbent idle but **younger** than the threshold → **refuse** (it may just be
+    between commands). The young-idle case is explicitly a refuse, not a race.
+
+  Refusing outright without the evict path would strand a returning client when the
+  incumbent link lingers after an abrupt loss (supervision timeout 4–32 s).
+  `transferActive()` already exists and excludes a fatally-NACKed pipe
+  ([display_service.cpp](../src/display_service.cpp)). nRF gets refusal free from
+  `begin(1,0)`; this whole bullet is the ESP32 analogue.
+- **Proactive idle drop.** The admission rule only fires when a contender connects; a
+  lone silent client is never challenged and holds the device out of its idle path
+  forever. So a loop-serviced `serviceBleIdleTimeout()`: if connected,
+  `!transferActive()`, and `bleMsSinceLastRx() > OD_BLE_IDLE_TIMEOUT_MS`, drop via the
+  seam + `abortToKnownState`. The BLE equivalent of LAN's `OD_LAN_READ_TIMEOUT_S`.
+  Default generously — 60 s (LAN's is 30 s, but BLE re-establishment is costlier) — a
+  compile-time `session_policy.h` constant, not a wire/config field. Same
+  `!transferActive()` gate; the from-START watchdog remains the backstop for a
+  transfer that progresses but never ends.
+  - *Deep sleep:* leave `lastActivityMs` and the deep-sleep quiet window alone — this
+    is a *link* drop, not a sleep decision. After it `connCount` falls to 0,
+    `pollActivity` stops re-stamping, and the existing idle/deep-sleep path takes over.
+- **LAN, one consistent model.** The token is connection-level, so a LAN accept while
+  BLE owns applies the **same** evict-vs-refuse rule: if the BLE incumbent is idle
+  `≥` the threshold and `!transferActive()`, release it and accept LAN; otherwise
+  refuse the LAN accept (`incoming.stop()`). Symmetrically, a BLE connect while LAN
+  owns is refused unless LAN is idle. `handleWiFiServer` accept
+  ([wifi_service.cpp:869-895](../src/wifi_service.cpp)) already evicts its own
+  previous TCP client; it gains only the cross-transport check and `linkClaim(OWNER_LAN, 0)`.
+
+### One thing to get right (easy to assume wrong)
+
+The ESP32 central cap **cannot** be forced to 1 with a `-D` build flag — the
+`CONFIG_BT_NIMBLE_MAX_CONNECTIONS = 3` in the precompiled `sdkconfig.h` wins, and a
+local override is silently inert. Exclusivity must be enforced in the connect handler,
+as above, not by config. (`serviceBleDisconnectCleanup`'s `ownerStillUp` guard is
+**already** unconditional as of PR `#132`, [main.cpp:404-409](../src/main.cpp) — Phase
+3 adds policy, not that restructuring.)
+
+### Verification
+
+Two centrals against one ESP32 (second refused, or idle incumbent evicted, per rule);
+BLE⇄LAN arbitration both directions; a refused stranger's disconnect does not tear
+down the incumbent (the `esp32-N4` no-WiFi path specifically). Idle drop: a client
+that connects, authenticates, and idles past the timeout is dropped; a fresh client
+gets the full window before its first command (the init fix from Phase 2); a streaming
+client is not dropped; a keepalive-sending client is not; after a drop the device
+returns to advertising/idle.
 
 ---
 
 ## Phase 4 — Auth-abuse disconnect
 
-**Goal:** drop the link after a bounded run of commands that never authenticate, so
-an unauthenticated peer cannot hold a slot (and, on ESP32, the *only* slot the owner
-token would otherwise hand it) indefinitely.
+**Goal:** drop the link after a bounded run of BLE commands that never authenticate,
+so an unauthenticated peer cannot hold the exclusive slot (on ESP32, the *only* slot
+the owner token would otherwise hand it) indefinitely.
 
 ### Design (fresh — a prototype exists off-branch but is not adopted wholesale)
 
@@ -316,84 +470,51 @@ two `serviceBleAuthAbuseDisconnect()` call sites in the per-target loop arms tha
 `#132` then merged, so they no longer have a home. Reuse the *counter* logic; drop
 the placement.
 
-- A per-session counter of consecutive commands answered with `RESP_AUTH_REQUIRED`
-  (the two sites at [communication.cpp:584,591](../src/communication.cpp), plus the
-  config-write sites at `:410,472`). Reset to 0 on any authenticated command.
-- At a threshold (start at **10**; justify against the client's legitimate
-  handshake, which authenticates within one exchange — 10 is generous), request a
-  link drop **through the Phase 0 seam from loop()**, not inline.
-- Ordering: the guard's final `00 xx FE` must already be in the response ring
-  *before* the drop is requested, or the client is left with no reason. So: raise
-  `s_authAbuseDropPending`, and a loop-serviced `serviceBleAuthAbuseDisconnect()`
-  (placed after `serviceBleTx()` in the shared loop body,
-  [main.cpp](../src/main.cpp)) drains TX, then `ble.disconnect(0x13)`, then
-  `abortToKnownState`/`linkRelease`. One placement, both targets — the whole reason
-  Phase 0 and the unified loop exist.
+- **Count only BLE.** A per-session counter of consecutive commands answered with
+  `RESP_AUTH_REQUIRED`, incremented **only when `g_commandOrigin == ORIGIN_BLE`**.
+  The generic auth gate at [communication.cpp:584,591](../src/communication.cpp) and
+  the config-write sites at `:410,472` are also reachable via the LAN-TLS bypass,
+  where app-layer auth is intentionally unnecessary; counting those without the
+  origin gate would let LAN-TLS traffic increment a counter that disconnects **BLE**.
+  Reset to 0 on any authenticated command.
+- **Threshold 10** (justify against the client's legitimate handshake, which
+  authenticates within one exchange — 10 is generous). Overflow raises
+  `s_authAbuseDropPending`; a loop-serviced `serviceBleAuthAbuseDisconnect()` handles
+  it. One placement, both targets — the whole reason Phase 2's seam and the unified
+  loop exist.
+- **Deliver the final `FE` before dropping — with a real barrier, not one flush.**
+  The last `00 xx FE` must reach the client, or it is dropped with no reason. A single
+  `serviceBleTx()` then disconnect does **not** guarantee that: TX deliberately
+  retains an entry on mbuf backpressure or a missing CCCD
+  ([command_queue.cpp:190](../src/command_queue.cpp)), and the final response may not
+  even enqueue if the 10-slot ring is full. So the drop is gated on a bounded barrier:
+  `serviceBleAuthAbuseDisconnect()` drains TX each loop pass and calls the seam only
+  once the TX ring has drained the `FE` **or** a bounded deadline
+  (`OD_AUTH_ABUSE_FLUSH_MS`, ~500 ms) elapses — then it drops regardless, so a
+  wedged/un-draining client cannot keep the abuser attached. Then
+  `abortToKnownState(dropLink=true)` (which releases the token).
 
 ### Depends on
 
-Phase 0 seam (the drop) and Phase 2 (release the token on drop). Independent of
-Phase 3 except that it should call `abortToKnownState` for the teardown rather than
-re-implementing it.
+Phase 2 (the seam, `abortToKnownState`, the owner token) and Phase 3 (it slots into
+the same admission/idle policy layer).
 
 ### Verification
 
-A peer sending N unauthenticated commands is dropped at the threshold with the
-`FE` delivered first; a legitimate client authenticating on its first exchange is
-never dropped; the counter resets across a good command. On nRF confirm the drop is
-not starved (the inline version's failure mode).
-
----
-
-## Phase 5 — Idle timer
-
-**Goal:** drop a BLE client that connects and then goes silent. Give BLE the
-idle-link-drop that LAN already has.
-
-### Design
-
-The blocker is that `connCount > 0` currently counts as activity
-([main.cpp:366](../src/main.cpp)), so `lastActivityMs` can never age out under a
-live link. Introduce a **separate** last-RX timestamp that a *live link alone* does
-NOT refresh — only actual inbound frames do — so silence is distinguishable from
-connection.
-
-- `lastBleRxMs`, stamped only when `bleRxQueueHead()` advances (real command
-  arrival), never by link liveness.
-- A loop-serviced `serviceBleIdleTimeout()`: if connected, `!transferActive()`, and
-  `millis() - lastBleRxMs > OD_BLE_IDLE_TIMEOUT_MS`, request a link drop via the
-  Phase 0 seam and `abortToKnownState`. Default the timeout generously (start at 60
-  s; the LAN analogue is 30 s but LAN sockets are cheaper to re-establish) and make
-  it a compile-time constant, overridable per env, **not** a wire/config field
-  (keeps the hard constraint).
-- Gate on `!transferActive()` so a long but legitimately-progressing transfer is
-  never dropped — pair it with the from-START watchdog, which remains the backstop
-  for a transfer that progresses but never ends.
-
-### Interaction with deep sleep
-
-Leave `lastActivityMs` and the deep-sleep quiet window alone; this is a *link* drop,
-not a sleep decision. After the drop, `connCount` falls to 0, `pollActivity` stops
-re-stamping, and the existing idle/deep-sleep path takes over naturally.
-
-### Depends on
-
-Phase 0 seam. Independent of Phases 2–4, but shares `serviceBle*` placement and
-`abortToKnownState`, so it lands cleanest after them.
-
-### Verification
-
-A client that connects, authenticates, and idles past the timeout is dropped; a
-client streaming a transfer past the timeout is **not**; a client sending periodic
-keepalive commands is not; after the drop the device returns to advertising/idle.
+A BLE peer sending N unauthenticated commands is dropped at the threshold with the
+`FE` delivered first (confirmed on a sniffer, since the barrier is the subtle part);
+the drop still happens within the deadline if the client stops reading; a legitimate
+client authenticating on its first exchange is never dropped; the counter resets
+across a good command; **LAN-TLS traffic never increments it**; on nRF the drop is not
+loop-starved.
 
 ---
 
 ## Verification model
 
 Every phase distinguishes two states, because "the code merged" and "the gap
-closed" are not the same claim and the old plan conflated them (it marked Phase 1
-shipped while its entire hardware matrix was — and remains — unrun).
+closed" are not the same claim. Phase 1 is the live example: it is shipped and
+host-tested, yet its entire hardware matrix is unrun — landed, not closed.
 
 - **Landed** = builds on all envs + host tests pass. A phase may merge here.
 - **Closed** = its companion HIL script has passed on **both** an nRF and an ESP32
@@ -405,11 +526,11 @@ The HIL scripts are the executable form of each Verification section, under
 
 | Phase | Script | Asserts |
 |---|---|---|
-| 1 (retroactive) | `test_nonce_gap.py` | a transfer survives a forced >256 forward counter gap; the old "Test 2b" (a nonce-dropped `0x0081` is repaired by SACK, upload completes) |
-| 2 | `test_exclusivity.py` | two centrals against one ESP32 → second refused, or idle incumbent evicted; BLE⇄LAN arbitration both directions; a refused stranger's disconnect does **not** tear down the incumbent (the `esp32-N4` no-WiFi path) |
-| 3 | `test_abort_state.py` | disconnect mid-{direct, partial, pipe, chunked-config, refresh}; every flagged state clean afterward, touch resumed, WARM panel survives, a second transfer starts clean |
-| 4 | `test_auth_abuse.py` | N unauthenticated commands → drop at the threshold with `FE` delivered first; a client authenticating on its first exchange is never dropped; the counter resets across a good command; on nRF the drop is not loop-starved |
-| 5 | `test_idle_drop.py` | a silent connected client is dropped past the timeout; a streaming client is not; a keepalive-sending client is not; the device returns to advertising after the drop |
+| 1 (retroactive) | `test_nonce_gap.py` | a transfer survives a forced >256 forward counter gap; a nonce-dropped `0x0081` frame is repaired by the client's SACK path and the upload completes |
+| 2 | `test_abort_state.py` | disconnect mid-{direct, partial, pipe, chunked-config, refresh}; every flagged state clean afterward, touch resumed, buzzer/LED stopped, crypto cleared, TX flushed, WARM panel survives; a gatecrasher's writes are dropped at the callback while the token is held; `bleMsSinceLastRx()` is 0 pre-connect and ages only on true silence |
+| 3 | `test_exclusivity.py` | two centrals against one ESP32 → second refused, or idle incumbent evicted; BLE⇄LAN arbitration both directions; refused-stranger disconnect does **not** tear down the incumbent (the `esp32-N4` no-WiFi path) |
+| 3 | `test_idle_drop.py` | a fresh silent client survives its first window then is dropped; a streaming client is not; a keepalive-sending client is not; the device returns to advertising after the drop |
+| 4 | `test_auth_abuse.py` | N unauthenticated BLE commands → drop at the threshold with `FE` delivered first; drop still occurs within the deadline if the client stops reading; a first-exchange auth is never dropped; the counter resets across a good command; LAN-TLS never increments it; on nRF the drop is not loop-starved |
 
 **Threshold drift is caught in the client's CI, not ours.** `session_policy.h`'s
 constants assume specific `py-opendisplay` behaviours (handshake authenticates
@@ -420,54 +541,38 @@ for the `0x04`-NACK reasoning recorded in `sendPipeNack()`. Every
 threshold-triggered drop also logs at WARN with the measured value, so field tuning
 has data rather than guesses.
 
-## Cross-repo: the sibling firmwares carry a worse form of Phase 1
-
-Not porting work inside this plan, but a **named deliverable**, not a footnote.
-`Firmware_NRF54/src/opendisplay_pipe.c` and `Firmware_NRF/encryption.c` run the
-same client and the same PIPE protocol, and both carry the nonce bug in a *worse*
-form than this repo had: they mutate `last_seen_counter` / the replay window
-**before** the CCM tag is verified (the D2 bug this repo already fixed), and use a
-±32 window that has the same forward-gap cliff Phase 1 removed.
-
-Deliverable: a `FINDINGS_*` doc in `opendisplay-protocol/agents/` mapping the defect
-in each, plus a tracked issue per repo. Minimum parity set, mirroring Phase 1:
-check/commit split (commit only post-tag), numeric ordering, no forward cap. Owner
-of each firmware schedules the port; this plan does not block on it, but records
-that the client-facing behaviour is only consistent once all four converge.
-
 ## Cross-cutting: what still has no watchdog
 
-None of Phases 2–5 add a loop-liveness monitor, and the old plan's Phase 2 scope
-cut removed the one it had. So a `loop()` genuinely wedged inside a non-yielding
-operation is still uncaught on nRF (no watchdog) and on ESP32 (TWDT fed by the
-yielding IDLE task). This is **out of scope** for this plan and recorded as residual
-risk, not silently dropped. The realistic mitigation — arm the ESP32 TWDT over
-`loop()` and add an nRF hardware WDT fed from `loop()` — is a separate phase whenever
-it is taken up; it is the true "supervisor," and it is not any of the five here.
+None of Phases 2–4 add a loop-liveness monitor. So a `loop()` genuinely wedged inside
+a non-yielding operation is still uncaught on nRF (no watchdog) and on ESP32 (`loop()`
+unsubscribed from the TWDT). This is **out of scope** and recorded as residual risk,
+not silently dropped. The realistic mitigation — subscribe `loop()` to the ESP32 TWDT
+and add an nRF hardware WDT fed from `loop()` — is a separate effort whenever it is
+taken up; it is the true "supervisor," and it is none of the four phases here.
 
 ## Deliberately not changed
 
 - No wire/protocol/config-schema change (hard constraint).
 - No `include/opendisplay_protocol.h` or `include/opendisplay_structs.h` edit.
-- The from-START transfer watchdog stays as the backstop; Phase 5's idle drop is
+- The from-START transfer watchdog stays as the backstop; Phase 3's idle drop is
   additive, not a replacement.
 - The nonce subsystem (Phase 1) is not reopened.
 
 ## Residual risk (honest list)
 
 These are the gaps this plan **cannot** design away, distinct from the ones it now
-tracks as work (HIL verification, threshold pinning, sibling-firmware parity —
-those have owners and exit criteria above, so they are no longer "risk").
+tracks as work (HIL verification, threshold pinning — those have owners and exit
+criteria above, so they are no longer "risk").
 
 - **No loop-liveness watchdog** (see the watchdog footnote above). A `loop()`
   wedged inside a non-yielding operation is still uncaught on nRF, and a true hard
   fault is unrecoverable there. Deliberately left as a separate future effort.
 - **Thresholds remain heuristics even when pinned.** `session_policy.h` and the
   client-side assertions make the assumptions legible and drift-detectable, but the
-  numbers are still judgement calls against a client that can change. The Phase 4/5
-  drops are self-limiting (a wrongly-dropped client reconnects); the one to tune
-  conservatively is Phase 2's evict-idle, where too aggressive a value could refuse
-  a legitimate reconnect.
+  numbers are still judgement calls against a client that can change. The auth-abuse
+  and idle drops are self-limiting (a wrongly-dropped client reconnects); the one to
+  tune conservatively is the evict-idle threshold, where too aggressive a value could
+  refuse a legitimate reconnect.
 - **"Closed" depends on hardware nobody has run yet.** The verification model makes
-  this explicit rather than papering over it: until the HIL scripts pass on both a
+  this explicit rather than papering over it: until the HIL scripts pass on both an
   nRF and an ESP32 board, every phase — including Phase 1 — is landed, not closed.
