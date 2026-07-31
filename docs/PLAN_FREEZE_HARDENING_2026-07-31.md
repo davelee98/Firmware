@@ -32,12 +32,44 @@ idle drop calls the abort routine.
 **Two cross-phase deliverables** thread through Phases 2–4 and are specified once
 here rather than repeated:
 
-- **`src/session_policy.h`** — every tunable threshold this plan introduces
-  (evict-idle age, auth-abuse count, idle-drop timeout) in one header, each
-  compile-time and overridable per env, each with a comment naming the *client
-  behaviour it assumes*. No threshold is a wire/config field, so none touches the
-  hard constraint. The point is that the assumptions are collected and legible, not
-  scattered across handlers as bare numbers.
+- **Threshold discipline — at the point of use, not in a new header.** Every tunable
+  this plan introduces (evict-idle age, idle-drop timeout, auth-abuse count and its
+  flush deadline) is a compile-time `#ifndef`-guarded `#define` **in the file that
+  consumes it**, each carrying a comment naming the *client behaviour it assumes*.
+  No threshold is a wire/config field, so none touches the hard constraint.
+
+  This follows the repo's existing convention rather than inventing one. The model is
+  [wifi_service.cpp:470-472](../src/wifi_service.cpp):
+
+  ```c
+  #ifndef OD_LAN_ROAM_RSSI_THRESHOLD
+  #define OD_LAN_ROAM_RSSI_THRESHOLD (-75)   /* dBm; valid range -100..10 */
+  #endif
+  ```
+
+  and likewise `OD_TINFL_DICT_SIZE`, `OD_CHARGER_FLAG_*`, `OD_LOG_LEVEL`
+  ([od_log.h:16-18](../src/od_log.h)); `TRANSFER_WATCHDOG_MS` is a plain `static const`
+  in [display_service.cpp:582](../src/display_service.cpp). There is no central
+  tunables header in this repo and this plan does not add one.
+
+  *An earlier draft specified a `src/session_policy.h` collecting all four.* It was
+  cut. It would have been the only file of its kind, and it groups by **type**
+  ("these are all thresholds") rather than by dependency: the four are consumed by two
+  unrelated subsystems — idle/evict by the loop-side policy helpers, auth-abuse by
+  `communication.cpp` — so the header buys a new include edge shared by two callers
+  that need nothing else from each other. The goal behind it was that the assumptions
+  be legible rather than bare numbers; that is served by the mandatory
+  client-behaviour comment, which reads *better* next to the code that acts on it, and
+  by the client-side CI assertions below. If a shared home is ever genuinely needed,
+  `structs.h` is the existing common hub.
+
+  **They do not go in the BLE transport headers either.** These are policy, and
+  Phase 2 is mechanisms-only by construction. This is settled precedent here, in the
+  same direction: [ble_transport.h:89-93](../src/ble_transport.h) records that the
+  loop-serviced deferred-work flags were *moved out* of the transport because they
+  "encode application policy, not link state, so exporting them from the transport
+  seam was backwards." The transport exposes `bleMsSinceLastRx()`; deciding how long
+  is too long belongs to the loop-side policy code that Phase 3 adds.
 - **A companion HIL test per phase**, under `tests/`, following the existing
   `tests/serial_stall_test.py` pattern (pytest driving a real board through
   `py-opendisplay`). These *are* the Verification sections — versioned with the
@@ -467,10 +499,24 @@ Phase 2 — and adds no new transport state.
   forever. So a loop-serviced `serviceBleIdleTimeout()`: if connected,
   `!transferActive()`, and `bleMsSinceLastRx() > OD_BLE_IDLE_TIMEOUT_MS`, drop via the
   seam + `abortToKnownState`. The BLE equivalent of LAN's `OD_LAN_READ_TIMEOUT_S`.
-  Default generously — 60 s (LAN's is 30 s, but BLE re-establishment is costlier) — a
-  compile-time `session_policy.h` constant, not a wire/config field. Same
+  Default generously — 60 s (LAN's is 30 s, but BLE re-establishment is costlier) — an
+  `#ifndef`-guarded define in the file that services it, not a wire/config field. Same
   `!transferActive()` gate; the from-START watchdog remains the backstop for a
   transfer that progresses but never ends.
+  - *Why it cannot live where its LAN cousin does, and what that costs.*
+    `OD_LAN_READ_TIMEOUT_S` is **not** a local tunable: it is defined at
+    [opendisplay_protocol.h:984](../include/opendisplay_protocol.h) and documented at
+    `:84` and `:945` as a client-visible contract ("the server drops a client only
+    after `OD_LAN_READ_TIMEOUT_S` with no traffic"). Its home is the wire header
+    because the client is entitled to know the number. The hard constraint forbids
+    touching that header, so the BLE timeout is forced local — deliberately
+    asymmetric with the LAN one, and invisible to clients except through the
+    client-side CI assertions below. That is the accepted trade, not an oversight: a
+    wrongly-dropped BLE client reconnects, so the cost of the client not knowing the
+    exact number is bounded. If the BLE timeout ever needs to be genuinely
+    client-visible, that is a wire change and goes through `../opendisplay-protocol`
+    first — at which point it belongs in the protocol header beside its LAN cousin,
+    not in firmware.
   - *Deep sleep:* leave `lastActivityMs` and the deep-sleep quiet window alone — this
     is a *link* drop, not a sleep decision. After it `connCount` falls to 0,
     `pollActivity` stops re-stamping, and the existing idle/deep-sleep path takes over.
@@ -528,7 +574,10 @@ the placement.
   authenticates within one exchange — 10 is generous). Overflow raises
   `s_authAbuseDropPending`; a loop-serviced `serviceBleAuthAbuseDisconnect()` handles
   it. One placement, both targets — the whole reason Phase 2's seam and the unified
-  loop exist.
+  loop exist. Per the threshold discipline above, the count lives `#ifndef`-guarded in
+  `communication.cpp` beside the auth gate that increments it, and
+  `OD_AUTH_ABUSE_FLUSH_MS` beside the servicer that enforces it — not in a shared
+  header.
 - **Deliver the final `FE` before dropping — with a real barrier, not one flush.**
   The last `00 xx FE` must reach the client, or it is dropped with no reason. A single
   `serviceBleTx()` then disconnect does **not** guarantee that: TX deliberately
@@ -579,8 +628,8 @@ The HIL scripts are the executable form of each Verification section, under
 | 3 | `test_idle_drop.py` | a fresh silent client survives its first window then is dropped; a streaming client is not; a keepalive-sending client is not; the device returns to advertising after the drop |
 | 4 | `test_auth_abuse.py` | N unauthenticated BLE commands → drop at the threshold with `FE` delivered first; drop still occurs within the deadline if the client stops reading; a first-exchange auth is never dropped; the counter resets across a good command; LAN-TLS never increments it; on nRF the drop is not loop-starved |
 
-**Threshold drift is caught in the client's CI, not ours.** `session_policy.h`'s
-constants assume specific `py-opendisplay` behaviours (handshake authenticates
+**Threshold drift is caught in the client's CI, not ours.** These thresholds
+assume specific `py-opendisplay` behaviours (handshake authenticates
 within one exchange; retransmits carry fresh, higher counters; keepalive cadence).
 Add an assertion of each to `py-opendisplay`'s test suite, so a client change that
 would invalidate a firmware constant breaks *there* — the same move already used
@@ -614,8 +663,9 @@ criteria above, so they are no longer "risk").
 - **No loop-liveness watchdog** (see the watchdog footnote above). A `loop()`
   wedged inside a non-yielding operation is still uncaught on nRF, and a true hard
   fault is unrecoverable there. Deliberately left as a separate future effort.
-- **Thresholds remain heuristics even when pinned.** `session_policy.h` and the
-  client-side assertions make the assumptions legible and drift-detectable, but the
+- **Thresholds remain heuristics even when pinned.** The mandatory
+  client-behaviour comment on each define, plus the
+  client-side assertions, make the assumptions legible and drift-detectable, but the
   numbers are still judgement calls against a client that can change. The auth-abuse
   and idle drops are self-limiting (a wrongly-dropped client reconnects); the one to
   tune conservatively is the evict-idle threshold, where too aggressive a value could
