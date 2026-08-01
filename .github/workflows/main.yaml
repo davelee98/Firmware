@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   # Separate top-level job on purpose ([L5]): the `build` job below is an
-  # 11-entry matrix, so a step added there would run the host test eleven times.
+  # 12-entry matrix, so a step added there would run the host tests twelve times.
   # This needs no toolchain beyond the runner's stock g++ and gates every push
   # alongside the firmware builds. tools/ is invisible to every firmware build
   # (build_src_filter is relative to src_dir and no env adds tools/), so the
