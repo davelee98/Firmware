@@ -695,6 +695,18 @@ static void serviceContenderRefusal() {
         if (w == 0) continue;
         if (ble.instanceClaimDecidedWordAt(i) != w) continue;   // in flight, or slot reused
         if (w == linkOwnerWord()) continue;                     // it won; not a contender
+
+        // Rate limit: retrying a failing disconnect() against the same contender every loop() pass floods the log.
+        static const uint32_t OD_BLE_CONTENDER_RETRY_MS = 250;
+        static uint32_t s_lastRefusalWord[3] = {0};
+        static uint32_t s_lastRefusalAttemptMs[3] = {0};
+        const uint32_t now = millis();
+        if (s_lastRefusalWord[i] == w && now - s_lastRefusalAttemptMs[i] < OD_BLE_CONTENDER_RETRY_MS) {
+            continue;
+        }
+        s_lastRefusalWord[i] = w;
+        s_lastRefusalAttemptMs[i] = now;
+
         const LinkId id = linkUnpackWord(w);
         od_log_info("Refusing contender h=%u e=%u (slot held)", (unsigned)id.handle,
                     (unsigned)id.epoch);
