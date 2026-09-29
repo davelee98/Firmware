@@ -251,16 +251,38 @@ static bool bootQrPixelBlack(uint16_t lx, uint16_t ly,
     return qrcode_getModule(qr, (uint8_t)mx, (uint8_t)my);
 }
 
+// Draws the srcW x srcH 1-bit logo bitmap scaled into a dstW x dstH box. At native
+// size this is a single bit read. When downscaling, each destination pixel takes the
+// majority of the source pixels it covers (box filter). Plain nearest-neighbour drops
+// or doubles strokes unevenly below ~0.5x. The source is always the next-larger
+// native bitmap, so a box covers at most ~4x4 source bits, and only pixels inside
+// the logo bounds get this far.
 static bool bootLogoPixelBlack(uint16_t lx, uint16_t ly,
                                int logoX, int logoY,
-                               const uint8_t* bmp, int bmpW, int bmpH, int stride,
-                               int maxX) {
-    if ((int)lx < logoX || (int)lx >= logoX + bmpW) return false;
+                               const uint8_t* bmp, int srcW, int srcH, int stride,
+                               int dstW, int dstH, int maxX) {
+    if ((int)lx < logoX || (int)lx >= logoX + dstW) return false;
     if ((int)lx >= maxX) return false;
-    if ((int)ly < logoY || (int)ly >= logoY + bmpH) return false;
-    int bx = (int)lx - logoX;
-    int by = (int)ly - logoY;
-    return (bmp[by * stride + bx / 8] >> (7 - (bx & 7))) & 1;
+    if ((int)ly < logoY || (int)ly >= logoY + dstH) return false;
+    const int bx = (int)lx - logoX;
+    const int by = (int)ly - logoY;
+    if (dstW == srcW && dstH == srcH) {
+        return (bmp[by * stride + bx / 8] >> (7 - (bx & 7))) & 1;
+    }
+    int sx0 = bx * srcW / dstW;
+    int sx1 = (bx + 1) * srcW / dstW;
+    int sy0 = by * srcH / dstH;
+    int sy1 = (by + 1) * srcH / dstH;
+    if (sx1 <= sx0) sx1 = sx0 + 1;
+    if (sy1 <= sy0) sy1 = sy0 + 1;
+    int black = 0;
+    for (int sy = sy0; sy < sy1; sy++) {
+        const uint8_t* srow = bmp + sy * stride;
+        for (int sx = sx0; sx < sx1; sx++) {
+            black += (srow[sx >> 3] >> (7 - (sx & 7))) & 1;
+        }
+    }
+    return black * 2 >= (sx1 - sx0) * (sy1 - sy0);
 }
 
 static uint16_t bootTextWidth(const char* s, uint8_t scale) {
@@ -407,6 +429,13 @@ static int bootHeaderBlockH(const char* manuf, const char* model, int manufScale
 //     return true;
 // }
 
+// Header text is sized as if it were at least 20 characters long, so short names
+// don't balloon. The logo sizing relies on the same rule.
+static int bootHeaderTextLen(const char* s) {
+    const int len = (int)strlen(s);
+    return len < 20 ? 20 : len;
+}
+
 static void bootPickHeaderScales(int headerH, int headerMaxX, int pad,
                                  const char* manuf, const char* model,
                                  int* manufScaleOut, int* modelScaleOut) {
@@ -417,8 +446,7 @@ static void bootPickHeaderScales(int headerH, int headerMaxX, int pad,
     const int availW = headerMaxX - pad;
 
     if (manuf[0] && model[0]) {
-        int modelLen = (int)strlen(model);
-        if (modelLen < 20) modelLen = 20;
+        const int modelLen = bootHeaderTextLen(model);
         int modelS = availW / (modelLen * 6);
         if (modelS < 1) modelS = 1;
         int manufS = (modelS * 13 + 19) / 20;  // target: manuf scale = 65% of model scale, rounded up
@@ -434,8 +462,7 @@ static void bootPickHeaderScales(int headerH, int headerMaxX, int pad,
     }
 
     if (model[0]) {
-        int modelLen = (int)strlen(model);
-        if (modelLen < 20) modelLen = 20;
+        const int modelLen = bootHeaderTextLen(model);
         int modelS = availW / (modelLen * 6);
         if (modelS < 1) modelS = 1;
         while (modelS > 1 && bootHeaderBlockH("", model, 1, modelS) > headerH - 8) modelS--;
@@ -443,8 +470,7 @@ static void bootPickHeaderScales(int headerH, int headerMaxX, int pad,
         return;
     }
 
-    int manufLen = (int)strlen(manuf);
-    if (manufLen < 20) manufLen = 20;
+    const int manufLen = bootHeaderTextLen(manuf);
     int manufS = availW / (manufLen * 6);
     if (manufS < 1) manufS = 1;
     while (manufS > 1 && bootHeaderBlockH(manuf, "", manufS, 1) > headerH - 8) manufS--;
@@ -853,28 +879,64 @@ bool writeBootScreenWithQr() {
     uint16_t modelY = 0;
 
 #ifdef BOOT_HAS_LOGO
-    const uint8_t* logoBmp;
-    int logoW = 0, logoH = 0, logoStride = 0;
+    const uint8_t* logoBmp = nullptr;
+    int logoSrcW = 0, logoSrcH = 0, logoStride = 0;  // native bitmap
+    int logoW = 0, logoH = 0;                        // drawn size
     int logoX = pad;
     int logoY = 8;
     if (useZoneLayout) {
-        // Logo scale: largest size whose height fits in headerH-16 and width is under 30% of logical width.
+        // Logo size: as large as fits in headerH-16 tall and under 30% of the logical
+        // width, capped at the largest native bitmap. The three native sizes are far
+        // apart (84 / 154 / 499 px wide), so snapping to one of them left most large
+        // screens with a logo only a third of the header tall. Instead, the smallest
+        // native bitmap at least as big as the target is box-downscaled to it.
         const int maxLogoH = headerH - 16;
-        const int maxLogoW = w_log * 3 / 10;
-        int logoScale = 1;
-        if (BOOT_LOGO_H_S3 <= maxLogoH && BOOT_LOGO_W_S3 < maxLogoW) logoScale = 3;
-        else if (BOOT_LOGO_H_S2 <= maxLogoH && BOOT_LOGO_W_S2 < maxLogoW) logoScale = 2;
-        if (logoScale >= 3) {
-            logoBmp = BOOT_LOGO_BITMAP_S3; logoW = BOOT_LOGO_W_S3;
-            logoH = BOOT_LOGO_H_S3; logoStride = BOOT_LOGO_STRIDE_S3;
-        } else if (logoScale >= 2) {
-            logoBmp = BOOT_LOGO_BITMAP_S2; logoW = BOOT_LOGO_W_S2;
-            logoH = BOOT_LOGO_H_S2; logoStride = BOOT_LOGO_STRIDE_S2;
-        } else {
-            logoBmp = BOOT_LOGO_BITMAP_S1; logoW = BOOT_LOGO_W_S1;
-            logoH = BOOT_LOGO_H_S1; logoStride = BOOT_LOGO_STRIDE_S1;
+        int maxLogoW = (int)w_log * 3 / 10;
+        // The header text shares the row, and its scale comes from the width left of
+        // the logo (see bootPickHeaderScales). Let the logo grow only into width the
+        // text would not use anyway: the text keeps the scale it gets beside the
+        // largest native bitmap that fits outright. Without this, narrow portrait
+        // headers such as 480x800 would drop the model name a text size.
+        const char* sizingLine = modelLine[0] ? modelLine : manufLine;
+        if (sizingLine[0]) {
+            int nativeW = BOOT_LOGO_W_S1;
+            if (BOOT_LOGO_H_S3 <= maxLogoH && BOOT_LOGO_W_S3 < maxLogoW) nativeW = BOOT_LOGO_W_S3;
+            else if (BOOT_LOGO_H_S2 <= maxLogoH && BOOT_LOGO_W_S2 < maxLogoW) nativeW = BOOT_LOGO_W_S2;
+            const int textCharsW = bootHeaderTextLen(sizingLine) * 6;
+            const int textRoom = contentRightX - 2 * pad;
+            const int textScale = (textRoom - nativeW) / textCharsW;
+            if (textScale >= 1) {
+                const int textCap = textRoom - textScale * textCharsW + 1;
+                if (textCap < maxLogoW) maxLogoW = textCap;
+            }
         }
-        logoX = contentRightX - logoW;
+        int targetH = maxLogoH < BOOT_LOGO_H_S3 ? maxLogoH : BOOT_LOGO_H_S3;
+        if (targetH * BOOT_LOGO_W_S3 / BOOT_LOGO_H_S3 >= maxLogoW) {
+            targetH = (maxLogoW - 1) * BOOT_LOGO_H_S3 / BOOT_LOGO_W_S3;
+        }
+        if (targetH <= BOOT_LOGO_H_S1) {
+            logoBmp = BOOT_LOGO_BITMAP_S1; logoSrcW = BOOT_LOGO_W_S1;
+            logoSrcH = BOOT_LOGO_H_S1; logoStride = BOOT_LOGO_STRIDE_S1;
+        } else if (targetH <= BOOT_LOGO_H_S2) {
+            logoBmp = BOOT_LOGO_BITMAP_S2; logoSrcW = BOOT_LOGO_W_S2;
+            logoSrcH = BOOT_LOGO_H_S2; logoStride = BOOT_LOGO_STRIDE_S2;
+        } else {
+            logoBmp = BOOT_LOGO_BITMAP_S3; logoSrcW = BOOT_LOGO_W_S3;
+            logoSrcH = BOOT_LOGO_H_S3; logoStride = BOOT_LOGO_STRIDE_S3;
+        }
+        // Tiny headers still get the smallest native logo rather than a smudge.
+        if (targetH < BOOT_LOGO_H_S1) targetH = BOOT_LOGO_H_S1;
+        logoH = targetH;
+        logoW = (targetH == logoSrcH) ? logoSrcW : targetH * logoSrcW / logoSrcH;
+        // The target came from S3's aspect ratio; S1/S2 differ by a hair, which can
+        // push the width 1px over the cap and cost the header text a size.
+        while (logoH > BOOT_LOGO_H_S1 && logoW >= maxLogoW) {
+            logoH--;
+            logoW = logoH * logoSrcW / logoSrcH;
+        }
+        // With no manufacturer/model text the header holds only the logo: centre it
+        // instead of leaving it stranded at the right of an empty band.
+        logoX = (manufLine[0] || modelLine[0]) ? contentRightX - logoW : ((int)w_log - logoW) / 2;
         logoY = (headerH - logoH) / 2;
     }
 #endif
@@ -1014,7 +1076,7 @@ bool writeBootScreenWithQr() {
                     bootTextPixelBlack(lx, ly, (uint16_t)k2X,    k2Y,    k2,         (uint8_t)middleScaleText, w_log, textMaxX) ||
                     bootQrPixelBlack(lx, ly, qrX, qrY, qrPx, modulePx, quiet, qrSize, &qr)
 #ifdef BOOT_HAS_LOGO
-                    || (useZoneLayout && bootLogoPixelBlack(lx, ly, logoX, logoY, logoBmp, logoW, logoH, logoStride, (int)w_log))
+                    || (useZoneLayout && bootLogoPixelBlack(lx, ly, logoX, logoY, logoBmp, logoSrcW, logoSrcH, logoStride, logoW, logoH, (int)w_log))
 #endif
                     ;
                 if (black) {
