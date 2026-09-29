@@ -341,6 +341,16 @@ static int bootQrModuleMax(uint16_t w, uint16_t h_full) {
     return 6;
 }
 
+// Smallest QR module the layout search accepts before it gives up on text size.
+// Without this floor the search keeps the largest text scale and shrinks the QR
+// to whatever is left, so landscape 800x600+ panels (e.g. 1600x1200) got 2-3px
+// modules squeezed beside oversized text. Panels below 800x600 (cap < 8) keep
+// the old behaviour: there, readable text matters more than QR size.
+static int bootQrModuleMin(uint16_t w, uint16_t h_full) {
+    const int moduleMax = bootQrModuleMax(w, h_full);
+    return (moduleMax >= 8) ? moduleMax / 2 : 1;
+}
+
 // Max text scale for the middle zone (header/footer use their own logic).
 static int bootMiddleScaleHi(uint16_t w_log, uint16_t h_log, bool useHighResLayout) {
     if (w_log >= 1600 && h_log >= 1200) return 10;
@@ -451,7 +461,7 @@ static void bootPickHeaderScales(int headerH, int headerMaxX, int pad,
     *manufScaleOut = manufS;
 }
 
-static bool bootLayoutFit(uint16_t w, uint16_t h, uint16_t h_full, int blockH, int pad, int qrModules, int* modulePxOut,
+static bool bootLayoutFit(uint16_t w, uint16_t h, uint16_t h_full, int blockH, int pad, int qrModules, int moduleMin, int* modulePxOut,
                           int* qrPxOut, bool* qrRightOut, int* qrXOut, int* qrYOut, int* availWOut,
                           int* textYOut, uint16_t maxTextW) {
     int textGap = pad;
@@ -464,7 +474,8 @@ static bool bootLayoutFit(uint16_t w, uint16_t h, uint16_t h_full, int blockH, i
     const int moduleMax = bootQrModuleMax(w, h_full);
     if (moduleIdeal > moduleMax) moduleIdeal = moduleMax;
 
-    for (modulePx = moduleIdeal; modulePx >= 1; modulePx--) {
+    if (moduleMin < 1) moduleMin = 1;
+    for (modulePx = moduleIdeal; modulePx >= moduleMin; modulePx--) {
         qrPx = modulePx * qrModules;
         if (qrPx > (int)w - pad * 2) continue;
         // Landscape: text left, QR right — both vertically centered in the taller of the two
@@ -764,16 +775,22 @@ bool writeBootScreenWithQr() {
         fwKey1Gap = 0;
 
         const int scaleHi = bootMiddleScaleHi(w_log, h_log, useHighResLayout);
-        for (tryScale = useZoneLayout ? scaleHi : 1; tryScale >= 1 && !layoutOk; tryScale--) {
-            middleScaleText = ultraHiResPanel ? (tryScale > 2 ? tryScale - 2 : 1) : tryScale;
-            pad = bootMiddlePad(middleScaleText, w_log, h_log, useZoneLayout);
-            fwKey1Gap = useZoneLayout ? middleScaleText * 6 : 0;
-            maxTextW = bootMaxTextWidth(bootLines, numBootLines, middleScaleText);
-            int contentH = useZoneLayout
-                ? (4 * bootLineStep(middleScaleText) + fwKey1Gap + 7 * middleScaleText)
-                : (((int)numBootLines - 1) * bootLineStep(middleScaleText) + 7 * middleScaleText);
-            layoutOk = bootLayoutFit(w_log, (uint16_t)middleH, h_log, contentH, pad, (int)qrModules, &modulePx, &qrPx, &qrRight, &qrX,
-                                     &qrY, &availW, &textY, maxTextW);
+        // Round 0 keeps the QR at a scannable size and shrinks the text to fit;
+        // round 1 (any module size) is the fallback for panels too small for that.
+        const int qrModuleMin = useZoneLayout ? bootQrModuleMin(w_log, h_log) : 1;
+        for (int round = (qrModuleMin > 1) ? 0 : 1; round < 2 && !layoutOk; round++) {
+            for (tryScale = useZoneLayout ? scaleHi : 1; tryScale >= 1 && !layoutOk; tryScale--) {
+                middleScaleText = ultraHiResPanel ? (tryScale > 2 ? tryScale - 2 : 1) : tryScale;
+                pad = bootMiddlePad(middleScaleText, w_log, h_log, useZoneLayout);
+                fwKey1Gap = useZoneLayout ? middleScaleText * 6 : 0;
+                maxTextW = bootMaxTextWidth(bootLines, numBootLines, middleScaleText);
+                int contentH = useZoneLayout
+                    ? (4 * bootLineStep(middleScaleText) + fwKey1Gap + 7 * middleScaleText)
+                    : (((int)numBootLines - 1) * bootLineStep(middleScaleText) + 7 * middleScaleText);
+                layoutOk = bootLayoutFit(w_log, (uint16_t)middleH, h_log, contentH, pad, (int)qrModules,
+                                         round == 0 ? qrModuleMin : 1, &modulePx, &qrPx, &qrRight, &qrX,
+                                         &qrY, &availW, &textY, maxTextW);
+            }
         }
         if (!layoutOk) {
             middleScaleText = 1;
