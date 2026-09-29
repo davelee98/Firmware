@@ -775,10 +775,11 @@ bool writeBootScreenWithQr() {
         fwKey1Gap = 0;
 
         const int scaleHi = bootMiddleScaleHi(w_log, h_log, useHighResLayout);
-        // Round 0 keeps the QR at a scannable size and shrinks the text to fit;
-        // round 1 (any module size) is the fallback for panels too small for that.
+        // Pass 0 keeps the QR at a scannable size and shrinks the text to fit.
+        // Pass 1 (any module size) is the original search: panels below 800x600
+        // (no floor) start there, and it stays as a safety net should pass 0 fail.
         const int qrModuleMin = useZoneLayout ? bootQrModuleMin(w_log, h_log) : 1;
-        for (int round = (qrModuleMin > 1) ? 0 : 1; round < 2 && !layoutOk; round++) {
+        for (int fitPass = (qrModuleMin > 1) ? 0 : 1; fitPass < 2 && !layoutOk; fitPass++) {
             for (tryScale = useZoneLayout ? scaleHi : 1; tryScale >= 1 && !layoutOk; tryScale--) {
                 middleScaleText = ultraHiResPanel ? (tryScale > 2 ? tryScale - 2 : 1) : tryScale;
                 pad = bootMiddlePad(middleScaleText, w_log, h_log, useZoneLayout);
@@ -788,7 +789,7 @@ bool writeBootScreenWithQr() {
                     ? (4 * bootLineStep(middleScaleText) + fwKey1Gap + 7 * middleScaleText)
                     : (((int)numBootLines - 1) * bootLineStep(middleScaleText) + 7 * middleScaleText);
                 layoutOk = bootLayoutFit(w_log, (uint16_t)middleH, h_log, contentH, pad, (int)qrModules,
-                                         round == 0 ? qrModuleMin : 1, &modulePx, &qrPx, &qrRight, &qrX,
+                                         fitPass == 0 ? qrModuleMin : 1, &modulePx, &qrPx, &qrRight, &qrX,
                                          &qrY, &availW, &textY, maxTextW);
             }
         }
