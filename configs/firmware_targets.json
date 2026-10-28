@@ -1,0 +1,6 @@
+{
+  "_comment": "Config file -> the one PlatformIO env its factory image must be built with. Every config_*.json in this directory needs an entry, and every env must be a released target in .github/firmware-targets.json. Checked by: tools/build_factory_image.py --check",
+  "targets": {
+    "config_Seeed-Studio_reTerminal-E1004.json": "esp32-s3-N32R8-extuart"
+  }
+}

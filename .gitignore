@@ -99,3 +99,14 @@ compile_commands.json
 
 ### VS Code workspace
 *.code-workspace
+
+# Windows download markers (NTFS Zone.Identifier streams copied into WSL)
+*:Zone.Identifier
+
+# Factory images from tools/build_factory_image.py (factory_images/README.md).
+# ESP32 *_full.bin images are build output and never committed. nRF images stay
+# tracked; keep these last so they re-include against the global *.hex above and
+# against any *.uf2 rule added later.
+factory_images/*.bin
+!factory_images/*.hex
+!factory_images/*.uf2

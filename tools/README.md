@@ -7,6 +7,10 @@ firmware's config layout.
 - `od-device-cli.py` — read, edit, and write a device's config over BLE.
 - `provision_firmware.py` — build firmware with a config baked in, or flash a
   config-clearing image.
+- `build_factory_image.py` — one step from a config JSON to a flashable
+  factory image (encode, build with the config embedded, verify, copy out).
+- `json2config.py` — encode a toolbox JSON export (`oep_config.json`) into a
+  raw config packet or hex string, using the toolbox's `config.yaml` schema.
 - `convert_logo.py` — convert `od_logo.svg` into a packed 1-bit C header for
   the boot screen.
 - `uf2conv.py` / `uf2families.json` — convert `.bin`/`.hex` images to UF2 for
@@ -91,3 +95,58 @@ device's 16-byte master key (32 hex chars):
 ```sh
 ./tools/od-device-cli.py read-config --addr AA:BB:CC:DD:EE:FF --key 1e6d01ca00803339d31ee98ca052da71
 ```
+
+## json2config.py
+
+Encodes a config exported from the web toolbox (**Export JSON** →
+`oep_config.json`) into the binary config packet the firmware stores. It is a
+port of the toolbox's own encoder, so the bytes match what the toolbox would
+write over BLE.
+
+Field sizes come from the toolbox schema, `configs/config.yaml`; pass
+`--schema` to use another copy. Configs kept for factory builds live in
+`configs/` too — see `configs/README.md` for naming and for refreshing the
+schema.
+
+```sh
+./tools/json2config.py configs/config_Seeed-Studio_reTerminal-E1004.json -o config.bin
+./tools/json2config.py configs/config_Seeed-Studio_reTerminal-E1004.json --hex
+
+```
+
+For a factory image, use `build_factory_image.py` below — it runs this
+encoder, picks the right firmware target, and verifies the result.
+
+Exports can include `wifi_config` and `security_config` blocks. Delete them
+from the JSON first unless you want the Wi-Fi password and encryption key
+embedded in the packet (and, for a factory build, in plain text in the
+firmware image).
+
+## build_factory_image.py
+
+One command from a config JSON (see `configs/`) to a flashable factory image.
+It encodes the JSON with `json2config.py`, builds the config's firmware target
+with the config embedded, checks the config packet is really inside the image,
+and copies the image to `factory_images/` (ESP32 `.bin` images there are
+git-ignored; rebuild them from the config):
+
+```sh
+./tools/build_factory_image.py configs/config_Seeed-Studio_reTerminal-E1004.json
+./tools/build_factory_image.py --check    # validate configs/firmware_targets.json
+```
+
+The env comes from `configs/firmware_targets.json`. The build is refused if the
+env is not a released target (`.github/firmware-targets.json`) or its chip does
+not match the config's `ic_type`. `-e` is only needed for a config that is not
+in the mapping (e.g. a one-off export), and must agree with the mapping
+otherwise.
+
+| Target | Output | Flash |
+|---|---|---|
+| ESP32 | `factory_<Manufacturer>_<Model>_<version>_full.bin` — bootloader, partitions and app merged | `esptool.py write-flash 0x0 <file>` |
+| nRF52840 | `factory_<Manufacturer>_<Model>_<version>.uf2` (+ `.hex`) | copy the `.uf2` onto the bootloader drive |
+
+`--version` defaults to the latest git tag. The build refuses a JSON that
+carries a Wi-Fi password or an enabled/non-zero encryption key unless you pass
+`--allow-secrets`. The embedded config is applied only when the device has no
+valid stored config, so erase flash first on a device that has been used.

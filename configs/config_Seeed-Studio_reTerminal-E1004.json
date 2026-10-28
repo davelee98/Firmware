@@ -1,0 +1,192 @@
+{
+  "version": 1,
+  "minor_version": 5,
+  "packets": [
+    {
+      "id": "1",
+      "name": "system_config",
+      "fields": {
+        "ic_type": "2",
+        "communication_modes": "0x1",
+        "device_flags": "0x1",
+        "pwr_pin": "12",
+        "reserved": "0x0",
+        "pwr_pin_2": "0",
+        "pwr_pin_3": "0"
+      }
+    },
+    {
+      "id": "2",
+      "name": "manufacturer_data",
+      "fields": {
+        "manufacturer_id": "1",
+        "board_type": "14",
+        "board_revision": "1",
+        "simple_config_driver_index": "24",
+        "simple_config_display_index": "37",
+        "simple_config_configured_at": "1790958290",
+        "simple_config_power_index": "11"
+      }
+    },
+    {
+      "id": "44",
+      "name": "data_extended",
+      "fields": {
+        "manufacturer_name": "Seeed Studio",
+        "model_name": "reTerminal E1004",
+        "serial_number": "",
+        "friendly_name": "",
+        "device_location": "",
+        "device_id": "",
+        "custom_string_1": "",
+        "custom_string_2": "",
+        "custom_string_3": ""
+      }
+    },
+    {
+      "id": "4",
+      "name": "power_option",
+      "fields": {
+        "power_mode": "1",
+        "battery_capacity_mah": "0x1388",
+        "sleep_timeout_ms": "40000",
+        "tx_power": "0x8",
+        "sleep_flags": "0x0",
+        "battery_sense_flags": "0x0",
+        "capacity_estimator": "5",
+        "deep_sleep_time_seconds": "0",
+        "reserved": "0x0",
+        "battery_sense_pin": "1",
+        "battery_sense_enable_pin": "21",
+        "voltage_scaling_factor": "0xb1",
+        "deep_sleep_current_ua": "0"
+      }
+    },
+    {
+      "id": "32",
+      "name": "display",
+      "fields": {
+        "instance_number": "0x0",
+        "display_technology": "1",
+        "panel_ic_type": "66",
+        "pixel_width": "1200",
+        "pixel_height": "1600",
+        "active_width_mm": "203",
+        "active_height_mm": "271",
+        "legacy_tagtype": "0x0",
+        "rotation": "0",
+        "reset_pin": "38",
+        "busy_pin": "13",
+        "dc_pin": "11",
+        "cs_pin": "10",
+        "data_pin": "9",
+        "partial_update_support": "0",
+        "color_scheme": "8",
+        "transmission_modes": "25",
+        "clk_pin": "7",
+        "cs_pin_2": "2",
+        "reserved_pin_3": "0xFF",
+        "reserved_pin_4": "0xFF",
+        "reserved_pin_5": "0xFF",
+        "reserved_pin_6": "0xFF",
+        "reserved_pin_7": "0xFF",
+        "reserved_pin_8": "0xFF",
+        "full_update_mC": "2875",
+        "reserved": "0x0"
+      }
+    },
+    {
+      "id": "33",
+      "name": "led",
+      "fields": {
+        "instance_number": "0x0",
+        "led_type": "0",
+        "led_1_r": "38",
+        "led_2_g": "6",
+        "led_3_b": "16",
+        "led_4": "0",
+        "led_flags": 2
+      }
+    },
+    {
+      "id": "37",
+      "name": "binary_inputs",
+      "fields": {
+        "instance_number": "0x0",
+        "input_type": "1",
+        "display_as": "1",
+        "inputpin1": "0x3",
+        "inputpin2": "0x4",
+        "inputpin3": "0x5",
+        "inputpin4": "0xff",
+        "inputpin5": "0xff",
+        "inputpin6": "0xff",
+        "inputpin7": "0xff",
+        "inputpin8": "0xff",
+        "isused": "0x7",
+        "invert": "0x7",
+        "pullups": "0x0",
+        "pulldowns": "0x0",
+        "button_data_byte_index": "0",
+        "power_off_flags": "0x0",
+        "power_off_hold_sec": "0x0",
+        "reserved": "0x0"
+      }
+    },
+    {
+      "id": "36",
+      "name": "data_bus",
+      "fields": {
+        "instance_number": "0x0",
+        "bus_type": "1",
+        "pin_1": "20",
+        "pin_2": "19",
+        "pin_3": "0",
+        "pin_4": "0",
+        "pin_5": "0",
+        "pin_6": "0",
+        "pin_7": "0",
+        "bus_speed_hz": "0",
+        "bus_flags": "0",
+        "pullups": "0",
+        "pulldowns": "0",
+        "reserved": "0x0"
+      }
+    },
+    {
+      "id": "41",
+      "name": "passive_buzzer",
+      "fields": {
+        "instance_number": "0x0",
+        "drive_pin": "45",
+        "enable_pin": "0xff",
+        "flags": 1,
+        "duty_percent": "0x32"
+      }
+    },
+    {
+      "id": "35",
+      "name": "sensor_data",
+      "fields": {
+        "sensor_type": "4",
+        "instance_number": "0",
+        "bus_id": "0x0",
+        "i2c_addr_7bit": "0x44",
+        "msd_data_start_byte": "1"
+      }
+    },
+    {
+      "id": "39",
+      "name": "security_config",
+      "fields": {
+        "encryption_enabled": "0x0",
+        "encryption_key": "00000000000000000000000000000000",
+        "session_timeout_seconds": "0x0",
+        "flags": "0x2",
+        "reset_pin": "0xff"
+      }
+    }
+  ],
+  "exported_at": "2026-10-02T16:29:40.175Z",
+  "exported_by": "OpenDisplay Toolbox"
+}

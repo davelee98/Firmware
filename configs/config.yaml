@@ -1,0 +1,1864 @@
+ble_proto:
+  meta:
+    description: 'BLE protocol specification. An outer packet contains one or more single packets. Each single packet has
+      a type id that defines its payload layout as described in packet_types below.
+
+      '
+    endianess: little
+    encoding: binary
+    alignment: packed
+    bitfield_convention: 'Bits are numbered from least significant bit (bit 0). Unused bits MUST be set to 0.
+
+      '
+    reserved_policy: 'Reserved fields MUST be set to 0 unless otherwise specified. Reserved byte blocks are provided for forward
+      compatibility and should be ignored by older parsers.
+
+      '
+    versioning:
+      description: 'Major version changes break backward compatibility. Minor version increments add fields or packet types
+        in a backward-compatible manner.
+
+        '
+  version: 1
+  minor_version: 5
+  packet_structure:
+    description: 'outer_packet wraps the overall transfer and contains a sequence of single_packet entries. single_packet
+      defines the structure of each entry contained in the packets field of outer_packet.
+
+      '
+    outer_packet:
+      fields:
+      - name: length
+        size: 2
+        description: Total length of outer packet including CRC. Receiver should allocate an adequate buffer (e.g. 4kB recommended)
+          for incoming packet data.
+      - name: version
+        size: 1
+        description: Major protocol version (matches ble_proto.version)
+      - name: packets
+        size: variable
+        description: Sequence of single_packet entries
+      - name: crc
+        size: 2
+        description: CRC16-CCITT (poly 0x1021, init 0xFFFF) over length+version+packets as if the 2-byte length field were 0x0000 (toolbox computes CRC before patching length); CRC field excluded
+    single_packet:
+      fields:
+      - name: number
+        size: 1
+        description: Packet index (sequential within outer packet, 0-based)
+      - name: id
+        size: 1
+        description: Packet type identifier (see packet_types)
+      - name: payload
+        size: variable
+        description: Packet-specific payload depending on id
+  packet_types:
+    1:
+      name: system_config
+      required: true
+      description: Holds information about host IC and power management pins
+      fields:
+      - name: ic_type
+        size: 2
+        description: IC used in this device
+        enum:
+          1:
+            name: NRF52840
+            description: nrf52840 based boards
+          2:
+            name: ESP32S3
+            description: esp32-s3 based boards
+          3:
+            name: ESP32C3
+            description: esp32-c3 based boards
+          4:
+            name: ESP32C6
+            description: esp32-c6 based boards
+          5:
+            name: NRF52811
+            description: nrf52811 based boards
+          6:
+            name: EFR32BG22C222F352GM40
+            description: EFR32BG22C222F352GM40 based boards
+          7:
+            name: NRF54L15
+            description: Seeed XIAO nRF54L15 (Zephyr)
+          8:
+            name: NRF54LM20
+            description: Seeed XIAO nRF54LM20A (Zephyr)
+          9:
+            name: ESP32
+            description: classic ESP32 based boards
+      - name: communication_modes
+        size: 1
+        description: Supported communication modes (bitfield)
+        bits:
+          0:
+            name: ble
+            description: BLE transfer supported
+          1:
+            name: oepl
+            description: OEPL based transfer supported
+          2:
+            name: wifi
+            description: WiFi transfer supported
+          3:
+            name: reserved_3
+          4:
+            name: reserved_4
+          5:
+            name: reserved_5
+          6:
+            name: reserved_6
+          7:
+            name: reserved_7
+      - name: device_flags
+        size: 1
+        description: Misc device flags (bitfield)
+        bits:
+          0:
+            name: pwr_pin
+            description: device has external power management for display etc.
+          1:
+            name: xiao_init
+            description: Use this to lower the power consumption of seeed xiao boards
+          2:
+            name: ws_pp_init
+            description: Use this to lower the power consumption of the Waveshare photo PhotoPainter
+          3:
+            name: pwr_latch
+            description: Self-holding MOSFET latch on pwr_pin_2; optional long-press shutdown button on pwr_pin_3
+          4:
+            name: pwr_latch_dff
+            description: 74AHC1G79 D-FF power latch; pwr_pin_2=D (hold data), pwr_pin_3=CP (clock). No power-button poll; command 0x0052 releases latch
+          5:
+            name: channel_sounding
+            description: BLE Channel Sounding (RAS reflector) enabled when firmware supports it (nRF54)
+          6:
+            name: reserved_6
+          7:
+            name: reserved_7
+      - name: pwr_pin
+        size: 1
+        description: Power pin number (if present); 0xFF if not present
+      - name: reserved
+        size: 15
+        description: Reserved bytes for future use
+      - name: pwr_pin_2
+        size: 1
+        description: Aux enable, battery-latch hold, or pwr_latch_dff D input (e.g. reTerminal Sticky PWR_HOLD GPIO45); 0 or 0xFF = firmware default
+      - name: pwr_pin_3
+        size: 1
+        description: Aux enable, battery-latch shutdown button, or pwr_latch_dff CP clock (e.g. PWR_LOCK GPIO46); 0 or 0xFF = none/default
+    2:
+      name: manufacturer_data
+      required: true
+      description: Manufacturer identifier and board information
+      fields:
+      - name: manufacturer_id
+        size: 2
+        description: Defines the manufacturer
+        enum:
+          0:
+            name: diy
+            description: self-built devices
+          1:
+            name: seeed
+            description: Seeed Studio
+          2:
+            name: waveshare
+            description: Waveshare Electronics
+          3:
+            name: SOL
+            description: SOL
+          4:
+            name: OpenDisplay
+            description: Only to be used for free giveaways
+          5:
+            name: Soldered
+            description: Soldered Electronics
+          6:
+            name: good_display
+            description: Good Display
+      - name: board_type
+        size: 1
+        description: Board identifier (depends on manufacturer_id)
+        conditional_enum:
+          depends_on: manufacturer_id
+          values:
+            0:
+              0:
+                name: custom
+                description: Custom DIY board
+            1:
+              0:
+                name: EE04
+                description: XIAO EE04(ESP32-S3)
+              1:
+                name: EN04
+                description: XIAO EN04(NRF52840)
+              2:
+                name: ESP32_S3
+                description: XIAO ESP32-S3
+              3:
+                name: ESP32_C6
+                description: XIAO ESP32-C6
+              4:
+                name: ESP32_C3
+                description: XIAO ESP32-C3
+              5:
+                name: NRF52840
+                description: XIAO NRF52840
+              6:
+                name: EE05
+                description: XIAO EE05(ESP32-S3)
+              7:
+                name: EN05
+                description: XIAO EN05(NRF52840)
+              8:
+                name: reTerminal_E1003
+                description: reTerminal E1003
+              9:
+                name: reTerminal_Sticky
+                description: reTerminal Sticky
+              10:
+                name: OpenDisplay_426_Mono_Kit
+                description: OpenDisplay 4.26" Mono Kit
+              11:
+                name: OpenDisplay_73_Color_Kit
+                description: OpenDisplay 7.3" Color Kit
+              12:
+                name: reTerminal_E1001
+                description: reTerminal E1001
+              13:
+                name: reTerminal_E1002
+                description: reTerminal E1002
+              14:
+                name: reTerminal_E1004
+                description: reTerminal E1004
+              15:
+                name: NRF54L15
+                description: XIAO nRF54L15
+              16:
+                name: NRF54LM20
+                description: XIAO nRF54LM20A
+              17:
+                name: EE02
+                description: XIAO EE02 (ESP32-S3 Plus, 13.3" Spectra6)
+            2:
+              0:
+                name: ESP32_S3:PhotoPainter
+                description: ESP32-S3-PhotoPainter
+              1:
+                name: E-Paper_ESP32_Driver_Board
+                description: Waveshare E-Paper ESP32 Driver Board
+            3:
+              0:
+                name: M3 NRF Lite
+                description: M3 NRF52811 Lite
+              1:
+                name: M3 NRF
+                description: M3 NRF52811
+              2:
+                name: M3 Silabs
+                description: M3 Silabs
+              3:
+                name: M3 Silabs Core
+                description: M3 Silabs Core
+              4:
+                name: M3 Silabs Pro
+                description: M3 Silabs Pro
+              5:
+                name: M3 Silabs Lite
+                description: M3 Silabs Lite
+              6:
+                name: M3 Silabs Peghook
+                description: M3 Silabs Peghook
+            5:
+              0:
+                name: Inkplate_5_V2
+                description: Inkplate 5 V2
+              1:
+                name: Inkplate_10
+                description: Inkplate 10
+            6:
+              0:
+                name: ESP32_133C02
+                description: ESP32-133C02 (ESP32-S3, 7.09"/13.3" Spectra6 driver board)
+      - name: board_revision
+        size: 1
+        description: Board revision number
+      - name: simple_config_driver_index
+        size: 2
+        description: Simple-config driver board preset index (1-based; 0 = not set)
+      - name: simple_config_display_index
+        size: 2
+        description: Simple-config display preset index (1-based; 0 = not set)
+      - name: simple_config_power_index
+        size: 2
+        description: Simple-config power preset index (1-based; 0 = not set)
+      - name: simple_config_configured_at
+        size: 6
+        description: Unix timestamp in seconds (48-bit LE) when simple config was last applied
+      - name: reserved
+        size: 6
+        description: Reserved bytes for future use
+    4:
+      name: power_option
+      required: true
+      description: Power supply and sleep related options
+      fields:
+      - name: power_mode
+        size: 1
+        description: Power source type enum
+        enum:
+          1:
+            name: battery
+            description: battery powered
+          2:
+            name: usb
+            description: usb powered
+          3:
+            name: solar
+            description: solar powered
+      - name: battery_capacity_mah
+        size: 3
+        description: Battery capacity in mAh (if present); 0 if unknown
+      - name: sleep_timeout_ms
+        size: 2
+        description: Nominal sleep time in milliseconds (actual sleep may be shorter)
+      - name: tx_power
+        size: 1
+        description: Transmit power setting (platform specific)
+      - name: sleep_flags
+        size: 1
+        description: Sleep-related flags (bitfield)
+        bits:
+          0:
+            name: reserved_0
+          1:
+            name: reserved_1
+          2:
+            name: reserved_2
+          3:
+            name: reserved_3
+          4:
+            name: reserved_4
+          5:
+            name: reserved_5
+          6:
+            name: reserved_6
+          7:
+            name: reserved_7
+      - name: battery_sense_pin
+        size: 1
+        description: Pin used to measure battery voltage (0xFF if none)
+      - name: battery_sense_enable_pin
+        size: 1
+        description: Pin that enables battery sense circuit (0xFF if none)
+      - name: battery_sense_flags
+        size: 1
+        description: Battery sense flags (bitfield)
+        bits:
+          0:
+            name: reserved_0
+          1:
+            name: reserved_1
+          2:
+            name: reserved_2
+          3:
+            name: reserved_3
+          4:
+            name: reserved_4
+          5:
+            name: reserved_5
+          6:
+            name: reserved_6
+          7:
+            name: reserved_7
+      - name: capacity_estimator
+        size: 1
+        description: Battery chemistry estimator enum
+        enum:
+          1:
+            name: li_ion
+            description: 1s li-ion
+          2:
+            name: lifepo4
+            description: 1s lifepo4
+          3:
+            name: supercap
+            description: 2s supercapacitor with maxium charge voltage of 4.5V and cutoff at 3.6V
+          4:
+            name: lithium_primary
+            description: Lithium primary battery
+          5:
+            name: seeed_li_ion
+            description: 1s li-ion, Seeed reTerminal E-series (E1001-E1003) discharge curve
+      - name: voltage_scaling_factor
+        size: 2
+        description: Voltage scaling / divider factor (implementation-specific)
+      - name: deep_sleep_current_ua
+        size: 4
+        description: Deep sleep current of the board in microamperes (excl. MCU consumption), 0 if unknown
+      - name: deep_sleep_time_seconds
+        size: 2
+        description: Deepsleep time in seconds(esp only, only on battery, 0 to disable)
+      - name: charge_enable_pin
+        size: 1
+        description: BQ25616 charge enable GPIO (0 or 0xFF = unused; reTerminal Sticky EN_BAT_CHGn = GPIO39)
+      - name: charge_state_pin
+        size: 1
+        description: BQ25616 charge-state input (0 or 0xFF = unused; Sticky CHARGE_STATE = GPIO40)
+      - name: charger_flags
+        size: 1
+        description: Bit 0 = charge enable active low (/CE); bit 1 = charge-state active low (BQ25616 STAT, charging when LOW)
+        bits:
+          0:
+            name: charge_enable_active_low
+          1:
+            name: charge_state_active_low
+          2:
+            name: reserved_2
+          3:
+            name: reserved_3
+          4:
+            name: reserved_4
+          5:
+            name: reserved_5
+          6:
+            name: reserved_6
+          7:
+            name: reserved_7
+      - name: min_wake_time_seconds
+        size: 2
+        description: Min awake window after first boot or button wake; 0 = default 120 s
+      - name: screen_timeout_seconds
+        size: 1
+        description: EPD keep-alive; seconds the panel stays powered after a refresh before shutdown (0-30, values above 30 clamped; 0 = power off immediately; forced 0 when an AXP2101 PMIC is present)
+      - name: reserved
+        size: 4
+        description: Reserved bytes for future use
+    32:
+      name: display
+      required: false
+      repeatable: true
+      description: Display / panel information (optional). Can appear multiple times for devices with several displays.
+      fields:
+      - name: instance_number
+        size: 1
+        description: Unique index for multiple display blocks (0-based)
+      - name: display_technology
+        size: 1
+        description: Display technology enum
+        enum:
+          0:
+            name: undefined
+            description: undefined
+          1:
+            name: e_paper
+            description: e-paper / ESL
+          2:
+            name: lcd
+            description: LCD display
+          3:
+            name: led_matrix
+            description: LED matrix type display
+      - name: panel_ic_type
+        size: 2
+        description: Display controller / panel type
+        enum:
+          0:
+            name: ep_panel_undefined
+            description: undefined / unknown panel
+          1:
+            name: ep42_400x300
+            description: WFT0420CZ15
+          2:
+            name: ep42b_400x300
+            description: DEPG0420BN / GDEY042T81
+          3:
+            name: ep213_122x250
+            description: Waveshare 2.13"
+          4:
+            name: ep213b_122x250
+            description: GDEY0213B74 (Inky pHAT 2.13" B/W newer)
+          5:
+            name: ep293_128x296
+            description: 128x296 panel
+          6:
+            name: ep294_128x296
+            description: Waveshare newer 2.9" 1-bit 128x296
+          7:
+            name: ep295_128x296
+            description: harvested Solum 2.9" BW ESLs
+          8:
+            name: ep295_128x296_4gray
+            description: 4-gray variant
+          9:
+            name: ep266_152x296
+            description: GDEY0266T90
+          10:
+            name: ep102_80x128
+            description: GDEW0102T4
+          11:
+            name: ep27b_176x264
+            description: GDEY027T91
+          12:
+            name: ep29r_128x296
+            description: tricolor panel
+          13:
+            name: ep122_192x176
+            description: GDEM0122T61
+          14:
+            name: ep154r_152x152
+            description: 1.54" B/W/R
+          15:
+            name: ep42r_400x300
+            description: 400x300 tricolor
+          16:
+            name: ep42r2_400x300
+            description: GDEQ042Z21
+          17:
+            name: ep37_240x416
+            description: GDEY037T03
+          18:
+            name: ep37b_240x416
+            description: CROWPANEL 3.7"
+          19:
+            name: ep213_104x212
+            description: InkyPHAT 2.13 B/W
+          20:
+            name: ep75_800x480
+            description: GDEY075T7 (older version)
+          21:
+            name: ep75_800x480_4gray
+            description: GDEW075T7 (older version) in 4 gray mode
+          22:
+            name: ep75_800x480_4gray_v2
+            description: GDEY075T7 older panel, darker grays needed
+          23:
+            name: ep29_128x296
+            description: Pimoroni Badger2040
+          24:
+            name: ep29_128x296_4gray
+            description: Pimoroni Badger2040 4-gray
+          25:
+            name: ep213r_122x250
+            description: Inky pHAT 2.13 B/W/R
+          26:
+            name: ep154_200x200
+            description: Waveshare 2.0" B/W
+          27:
+            name: ep154b_200x200
+            description: DEPG01540BN
+          28:
+            name: ep266yr_184x360
+            description: GDEY0266F51
+          29:
+            name: ep29yr_128x296
+            description: GDEY029F51
+          30:
+            name: ep29yr_168x384
+            description: GDEY029F51H
+          31:
+            name: ep583_648x480
+            description: DEPG0583BN
+          32:
+            name: ep296_128x296
+            description: Waveshare 2.9" 128x296 B/W V2
+          33:
+            name: ep26r_152x296
+            description: Solum 2.6" B/W/R
+          34:
+            name: ep73_800x480
+            description: GEDY073D46 (slower, EOL 7-color)
+          35:
+            name: ep73_spectra_800x480
+            description: Spectra 6/7-color 800x480
+          36:
+            name: ep74r_640x384
+            description: 640x384 panel
+          37:
+            name: ep583r_600x448
+            description: 4-bits per pixel panel
+          38:
+            name: ep75r_800x480
+            description: Waveshare 800x480 3-color
+          39:
+            name: ep426_800x480
+            description: Waveshare 4.26" B/W 800x480
+          40:
+            name: ep426_800x480_4gray
+            description: 4.26" 2-bit grayscale mode
+          41:
+            name: ep29r2_128x296
+            description: Adafruit 2.9" Tricolor FeatherWing
+          42:
+            name: ep41_640x400
+            description: EInk ED040TC1 SPI UC81xx
+          43:
+            name: ep81_spectra_1024x576
+            description: Spectra 8.1" 1024x576 6-color
+          44:
+            name: ep7_960x640
+            description: ED070EC1
+          45:
+            name: ep213r2_122x250
+            description: UC8151 3-color
+          46:
+            name: ep29z_128x296
+            description: SSD1680 (CrowPanel 2.9")
+          47:
+            name: ep29z_128x296_4gray
+            description: SSD1680 4-gray
+          48:
+            name: ep213z_122x250
+            description: SSD1680 CrowPanel 2.13"
+          49:
+            name: ep213z_122x250_4gray
+            description: CrowPanel 2.13" 4-gray mode
+          50:
+            name: ep154z_152x152
+            description: CrowPanel 1.54"
+          51:
+            name: ep579_792x272
+            description: CrowPanel 5.79"
+          52:
+            name: ep213yr_122x250
+            description: GDEY0213F52
+          53:
+            name: ep37yr_240x416
+            description: GDEM037F51
+          54:
+            name: ep35yr_184x384
+            description: GDEM035F51
+          55:
+            name: ep397yr_800x480
+            description: GDEM0397F81
+          56:
+            name: ep154yr_200x200
+            description: GDEM0154F51H
+          57:
+            name: ep266yr2_184x360
+            description: GDEY0266F52H
+          58:
+            name: ep42yr_400x300
+            description: GDEM042F52
+          59:
+            name: ep75_800x480_gen2
+            description: GEDY075-D2 (Waveshare/Xiao V2 panels)
+          60:
+            name: ep75_800x480_4gray_gen2
+            description: GDEY075T7-D2 (newer version) in 4 gray mode
+          61:
+            name: ep215yr_160x296
+            description: Waveshare 2.15" 4 color
+          62:
+            name: ep1085_1360x480
+            description: GDEM1085T51
+          63:
+            name: ep31_240x320
+            description: GDEQ031T10 LilyGo T-Deck Pro
+          64:
+            name: EP75YR_800x480
+            description: EP75YR_800x480
+          67:
+            name: ep154_200x200_4gray
+            description: Waveshare 1.54"
+          68:
+            name: ep42b_400x300_4gray
+            description: DEPG0420BN / GDEY042T81
+          69:
+            name: ep397_800x480
+            description: GDEM0397T81P
+          70:
+            name: ep397_800x480_4gray
+            description: GDEM0397T81P 4-gray
+          71:
+            name: ep368_792x528
+            description: xteink X3 3.68" B/W
+          72:
+            name: ep368_792x528_4gray
+            description: xteink X3 3.68" 4-gray
+          73:
+            name: ep213zz_122x250
+            description: LilyGo T3S3 2.13"
+          74:
+            name: ep40_spectra_400x600
+            description: GDEP040E01 Spectra 6 4" 400x600
+          75:
+            name: ep27_176x264
+            description: Badger2350 B/W
+          76:
+            name: ep27_176x264_4gray
+            description: Badger2350 4-gray
+          1000:
+            name: uc8176_420_bw
+            description: UC8176 4.2" B/W
+          1001:
+            name: ssd1619_420_bwr
+            description: SSD1619 4.2" B/W/R
+          1002:
+            name: uc8176_420_bwr
+            description: UC8176 4.2" B/W/R
+          1003:
+            name: ssd1619_420_bw
+            description: SSD1619 4.2" B/W
+          1004:
+            name: jd79668_420_bwry
+            description: JD79668 4.2" B/W/R/Y
+          1005:
+            name: uc8179_750_bw
+            description: UC8179 7.5" B/W
+          1006:
+            name: uc8179_750_bwr
+            description: UC8179 7.5" B/W/R
+          1007:
+            name: uc8159_750_low_bw
+            description: UC8159 7.5" Low Power B/W
+          1008:
+            name: uc8159_750_low_bwr
+            description: UC8159 7.5" Low Power B/W/R
+          1009:
+            name: ssd1677_750_hd_bw
+            description: SSD1677 7.5" HD B/W
+          1010:
+            name: ssd1677_750_hd_bwr
+            description: SSD1677 7.5" HD B/W/R
+          1011:
+            name: jd79665_750_bwry
+            description: JD79665 7.5" B/W/R/Y
+          1012:
+            name: jd79665_583_bwry
+            description: JD79665 5.83" B/W/R/Y
+          1013:
+            name: uc8151_029_bw
+            description: UC8151 2.9" 168x384 B/W
+          1014:
+            name: uc8151_029_bwr
+            description: UC8151 2.9" 168x384 B/W/R
+          1015:
+            name: ssd1619_029_bw
+            description: SSD1619 2.9" 168x384 B/W
+          1016:
+            name: ssd1619_029_bwr
+            description: SSD1619 2.9" 168x384 B/W/R
+          1017:
+            name: ssd1619_016_bw
+            description: SSD1619 1.6" 200x200 B/W
+          1018:
+            name: ssd1619_016_bwr
+            description: SSD1619 1.6" 200x200 B/W/R
+          1019:
+            name: ssd1619_022_bw
+            description: SSD1619 2.2" 240x320 B/W
+          1020:
+            name: ssd1619_022_bwr
+            description: SSD1619 2.2" 240x320 B/W/R
+          1021:
+            name: ssd1619_026_bw
+            description: SSD1619 2.6" 296x152 B/W
+          1022:
+            name: ssd1619_026_bwr
+            description: SSD1619 2.6" 296x152 B/W/R
+          1023:
+            name: uc8151_027_bw
+            description: UC8151 2.7" 200x300 B/W
+          1024:
+            name: uc8151_027_bwr
+            description: UC8151 2.7" 200x300 B/W/R
+          1025:
+            name: uc43_430_bw
+            description: UC variant 4.3" 152x522 B/W
+          1026:
+            name: uc43_430_bwr
+            description: UC variant 4.3" 152x522 B/W/R
+          1027:
+            name: ssd1619_013_bw
+            description: SSD1619 1.3" 144x200 B/W
+          1028:
+            name: ssd1619_013_bwr
+            description: SSD1619 1.3" 144x200 B/W/R
+          1029:
+            name: ssd1619_022_lite_bw
+            description: SSD1619 M3 Lite 2.2" 250x128 B/W
+          1030:
+            name: ssd1619_022_lite_bwr
+            description: SSD1619 M3 Lite 2.2" 250x128 B/W/R
+          3000:
+            name: ed103tc2_1872x1404
+            description: E Ink ED103TC2 + IT8951 (10.3", 1872x1404, 1bpp; FastEPD IT8951 path).
+          3001:
+            name: ed103tc2_1872x1404_4gray
+            description: Same panel as 3000; 4bpp (16-level; FastEPD IT8951 path)
+          3002:
+            name: inkplate5v2_1280x720
+            description: Soldered Inkplate 5 V2 (ED050WROW, 1280x720; FastEPD native parallel path)
+          3003:
+            name: inkplate10_1200x825
+            description: Soldered Inkplate 10 (ED097TC2, 1200x825; FastEPD native parallel path)
+          3004:
+            name: m5papers3_960x540
+            description: M5Stack PaperS3 (ED047TC1-class, 960x540, 16-gray capable; FastEPD native parallel path)
+      - name: pixel_width
+        size: 2
+        description: Pixel width of panel
+      - name: pixel_height
+        size: 2
+        description: Pixel height of panel
+      - name: active_width_mm
+        size: 2
+        description: Active width of panel in millimeters
+      - name: active_height_mm
+        size: 2
+        description: Active height of panel in millimeters
+      - name: legacy_tagtype
+        size: 2
+        description: Legacy tag type (optional)
+      - name: rotation
+        size: 1
+        description: Physical rotation in degrees (enum)
+        enum:
+          0:
+            name: rot_0
+            description: 0 degrees
+          1:
+            name: rot_90
+            description: 90 degrees
+          2:
+            name: rot_180
+            description: 180 degrees
+          3:
+            name: rot_270
+            description: 270 degrees
+      - name: reset_pin
+        size: 1
+        description: Pin number for panel reset (0xFF if none)
+      - name: busy_pin
+        size: 1
+        description: Pin number to read panel busy status (0xFF if none)
+      - name: dc_pin
+        size: 1
+        description: Data/Command select pin (0xFF if none)
+      - name: cs_pin
+        size: 1
+        description: SPI chip select pin (0xFF if none)
+      - name: data_pin
+        size: 1
+        description: Data out pin (MOSI / data line)
+      - name: partial_update_support
+        size: 1
+        description: Partial update capability (enum)
+        enum:
+          0:
+            name: false
+            description: only full updates supported
+          1:
+            name: true
+            description: partial updates supported
+          2:
+            name: full-frame
+            description: partial updates supported but full-frame stream required
+      - name: color_scheme
+        size: 1
+        description: Color scheme supported by the display
+        enum:
+          0:
+            name: bw
+            description: black & white
+          1:
+            name: bwr
+            description: black, white, red
+          2:
+            name: bwy
+            description: black, white, yellow
+          3:
+            name: bwry
+            description: black, white, red, yellow
+          4:
+            name: bwgbry
+            description: black, white, green, blue, red, yellow
+          5:
+            name: bw4
+            description: black, gray, gray, white
+          6:
+            name: gray16
+            description: 16-level grayscale (4bpp)
+          7:
+            name: 7color
+            description: 7color
+          8:
+            name: bwgbry_split
+            description: Spectra 6 same nibbles as bwgbry, packed left-half plane then right-half plane (dual-CS panels, no device framebuffer)
+          100:
+            name: RGB565
+            description: RGB565
+          101:
+            name: RGB888
+            description: RGB888
+          102:
+            name: 16bpc
+            description: RGB 16 bit per color
+      - name: transmission_modes
+        size: 1
+        description: Supported image/data transmission modes (bitfield)
+        bits:
+          0:
+            name: streaming_decompression
+            description: Streaming zlib decompression with a 512-byte DEFLATE window (requires zip).
+          1:
+            name: zip
+            description: zip compressed transfer
+          2:
+            name: g5
+            description: group 5 compression(not yet implemented)
+          3:
+            name: direct_write
+            description: direct write mode (bufferless)
+          4:
+            name: pipe_write
+            description: pipe write mode. faster transfer using sliding window pipeline
+          5:
+            name: reserved_5
+          6:
+            name: reserved_6
+          7:
+            name: no_boot_text
+            description: boots up without any text on the screen
+      - name: clk_pin
+        size: 1
+        description: clk_pin
+      - name: cs_pin_2
+        size: 1
+        description: Second CS for displays split over 2 drivers
+      - name: reserved_pin_3
+        size: 1
+        description: Reserved / spare pin 3
+      - name: reserved_pin_4
+        size: 1
+        description: Reserved / spare pin 4
+      - name: reserved_pin_5
+        size: 1
+        description: Reserved / spare pin 5
+      - name: reserved_pin_6
+        size: 1
+        description: Reserved / spare pin 6
+      - name: reserved_pin_7
+        size: 1
+        description: Reserved / spare pin 7
+      - name: reserved_pin_8
+        size: 1
+        description: Reserved / spare pin 8
+      - name: full_update_mC
+        size: 2
+        description: Energy consumed for a full update in mC
+      - name: reserved
+        size: 13
+        description: Reserved bytes for future use
+    33:
+      name: led
+      required: false
+      repeatable: true
+      description: Optional LED configuration (repeatable)
+      fields:
+      - name: instance_number
+        size: 1
+        description: Unique index for multiple LED blocks (0-based)
+      - name: led_type
+        size: 1
+        description: LED type enum (RGB, single, RY, etc.)
+        enum:
+          0:
+            name: rgb
+            description: RGB LED
+          1:
+            name: single
+            description: single LED
+          2:
+            name: ry
+            description: red/yellow configuration
+          3:
+            name: four_separate
+            description: four separate LEDs
+      - name: led_1_r
+        size: 1
+        description: LED channel 1 (red) pin number
+      - name: led_2_g
+        size: 1
+        description: LED channel 2 (green) pin number
+      - name: led_3_b
+        size: 1
+        description: LED channel 3 (blue) pin number
+      - name: led_4
+        size: 1
+        description: LED channel 4 pin number (if present)
+      - name: led_flags
+        size: 1
+        description: LED invert + options (bitfield); bit 4 = flash on button press
+        bits:
+          0:
+            name: led1_invert
+          1:
+            name: led2_invert
+          2:
+            name: led3_invert
+          3:
+            name: led4_invert
+          4:
+            name: button_press
+            description: Short LED flash on button press (including button-wake synthetic click)
+          5:
+            name: reserved_5
+          6:
+            name: reserved_6
+          7:
+            name: reserved_7
+      - name: reserved
+        size: 15
+        description: Reserved bytes for future use
+    35:
+      name: sensor_data
+      required: false
+      repeatable: true
+      description: Optional sensor readings / definitions (repeatable)
+      fields:
+      - name: instance_number
+        size: 1
+        description: Unique index for multiple sensor blocks (0-based)
+      - name: sensor_type
+        size: 2
+        description: Sensor type enum
+        enum:
+          1:
+            name: temperature
+            description: temperature sensor
+          2:
+            name: humidity
+            description: humidity sensor
+          3:
+            name: axp2101_pmic
+            description: AXP2101 Power Management IC
+          4:
+            name: sht40
+            description: Sensirion SHT40 (I2C). Writes 3 bytes LE into MSD dynamicreturndata (21 bits, 0.1°C and 0.1% RH)
+          5:
+            name: bq27220
+            description: TI BQ27220 fuel gauge (I2C 0x55). Voltage in MSD bytes 14–15; one packed dynamic byte at msd_data_start_byte (bits 0–6 = SOC %, bit 7 = charging; 0xFF index = skip)
+          6:
+            name: npm1300
+            description: Nordic nPM1300 PMIC. Bit-bang I2C via data_bus (bus_id); default addr 0x6B. Voltage in MSD 14–15; packed SOC/charging byte like BQ27220 (SOC estimated from VBAT)
+      - name: bus_id
+        size: 1
+        description: Instance id of the bus to use for this sensor
+      - name: i2c_addr_7bit
+        size: 1
+        description: I2C 7-bit address; 0 or 0xFF = default for sensor (SHT40 0x44, BQ27220 0x55, NPM1300 0x6B)
+      - name: msd_data_start_byte
+        size: 1
+        description: First dynamicreturndata index. SHT40 uses 3 bytes (0 or 0xFF = default 7). BQ27220/NPM1300 uses 1 packed byte (0xFF = do not publish)
+      - name: reserved
+        size: 24
+        description: Reserved bytes for future use
+    36:
+      name: data_bus
+      required: false
+      repeatable: true
+      description: Global bus definitions (I2C/SPI etc.)
+      fields:
+      - name: instance_number
+        size: 1
+        description: Unique index for multiple bus blocks (0-based)
+      - name: bus_type
+        size: 1
+        description: Bus type enum
+        enum:
+          1:
+            name: i2c
+            description: I2C bus
+          2:
+            name: spi
+            description: SPI bus
+      - name: pin_1
+        size: 1
+        description: Pin 1 (SCL for I2C)
+      - name: pin_2
+        size: 1
+        description: Pin 2 (SDA for I2C)
+      - name: pin_3
+        size: 1
+        description: Pin 3 (aux)
+      - name: pin_4
+        size: 1
+        description: Pin 4 (aux)
+      - name: pin_5
+        size: 1
+        description: Pin 5 (aux)
+      - name: pin_6
+        size: 1
+        description: Pin 6 (aux)
+      - name: pin_7
+        size: 1
+        description: Pin 7 (aux)
+      - name: bus_speed_hz
+        size: 4
+        description: Bus speed in Hz (32-bit value)
+      - name: bus_flags
+        size: 1
+        description: Bus flags (bitfield)
+        bits:
+          0:
+            name: reserved_0
+          1:
+            name: reserved_1
+          2:
+            name: reserved_2
+          3:
+            name: reserved_3
+          4:
+            name: reserved_4
+          5:
+            name: reserved_5
+          6:
+            name: reserved_6
+          7:
+            name: reserved_7
+      - name: pullups
+        size: 1
+        description: Internal pullup resistors (bit per pin)
+        bits:
+          0:
+            name: pin_1
+          1:
+            name: pin_2
+          2:
+            name: pin_3
+          3:
+            name: pin_4
+          4:
+            name: pin_5
+          5:
+            name: pin_6
+          6:
+            name: pin_7
+          7:
+            name: reserved
+      - name: pulldowns
+        size: 1
+        description: Internal pulldown resistors (bit per pin)
+        bits:
+          0:
+            name: pin_1
+          1:
+            name: pin_2
+          2:
+            name: pin_3
+          3:
+            name: pin_4
+          4:
+            name: pin_5
+          5:
+            name: pin_6
+          6:
+            name: pin_7
+          7:
+            name: reserved
+      - name: reserved
+        size: 14
+        description: Reserved bytes for future use
+    37:
+      name: binary_inputs
+      required: false
+      repeatable: true
+      description: Optional binary inputs (buttons, switches)
+      fields:
+      - name: instance_number
+        size: 1
+        description: Unique index for multiple input blocks (0-based)
+      - name: input_type
+        size: 1
+        description: Input type enum
+        enum:
+          1:
+            name: button
+            description: single button
+          2:
+            name: switch
+            description: single switch
+      - name: display_as
+        size: 1
+        description: How input should be represented in systems (enum)
+        enum:
+          1:
+            name: as_button
+            description: display as button
+          2:
+            name: as_switch
+            description: display as switch
+      - name: inputpin1
+        size: 1
+        description: pin 1 (GPIO pin number, 0xFF = not configured)
+      - name: inputpin2
+        size: 1
+        description: pin 2 (GPIO pin number, 0xFF = not configured)
+      - name: inputpin3
+        size: 1
+        description: pin 3 (GPIO pin number, 0xFF = not configured)
+      - name: inputpin4
+        size: 1
+        description: pin 4 (GPIO pin number, 0xFF = not configured)
+      - name: inputpin5
+        size: 1
+        description: pin 5 (GPIO pin number, 0xFF = not configured)
+      - name: inputpin6
+        size: 1
+        description: pin 6 (GPIO pin number, 0xFF = not configured)
+      - name: inputpin7
+        size: 1
+        description: pin 7 (GPIO pin number, 0xFF = not configured)
+      - name: inputpin8
+        size: 1
+        description: pin 8 (GPIO pin number, 0xFF = not configured)
+      - name: isused
+        size: 1
+        description: Pin used flags (bitfield)
+        bits:
+          0:
+            name: pin1used
+          1:
+            name: pin2used
+          2:
+            name: pin3used
+          3:
+            name: pin4used
+          4:
+            name: pin5used
+          5:
+            name: pin6used
+          6:
+            name: pin7used
+          7:
+            name: pin8used
+      - name: invert
+        size: 1
+        description: Invert flags per pin (bitfield)
+        bits:
+          0:
+            name: pin_1
+          1:
+            name: pin_2
+          2:
+            name: pin_3
+          3:
+            name: pin_4
+          4:
+            name: pin_5
+          5:
+            name: pin_6
+          6:
+            name: pin_7
+          7:
+            name: pin_8
+      - name: pullups
+        size: 1
+        description: Internal pullup resistors per pin (bitfield)
+        bits:
+          0:
+            name: pin_1
+          1:
+            name: pin_2
+          2:
+            name: pin_3
+          3:
+            name: pin_4
+          4:
+            name: pin_5
+          5:
+            name: pin_6
+          6:
+            name: pin_7
+          7:
+            name: pin_8
+      - name: pulldowns
+        size: 1
+        description: Internal pulldown resistors per pin (bitfield)
+        bits:
+          0:
+            name: pin_1
+          1:
+            name: pin_2
+          2:
+            name: pin_3
+          3:
+            name: pin_4
+          4:
+            name: pin_5
+          5:
+            name: pin_6
+          6:
+            name: pin_7
+          7:
+            name: pin_8
+      - name: button_data_byte_index
+        size: 1
+        description: Byte index in dynamicreturndata (0-10) for button data reporting
+        enum:
+          0:
+            name: byte_0
+            description: Use dynamicreturndata[0]
+          1:
+            name: byte_1
+            description: Use dynamicreturndata[1]
+          2:
+            name: byte_2
+            description: Use dynamicreturndata[2]
+          3:
+            name: byte_3
+            description: Use dynamicreturndata[3]
+          4:
+            name: byte_4
+            description: Use dynamicreturndata[4]
+          5:
+            name: byte_5
+            description: Use dynamicreturndata[5]
+          6:
+            name: byte_6
+            description: Use dynamicreturndata[6]
+          7:
+            name: byte_7
+            description: Use dynamicreturndata[7]
+          8:
+            name: byte_8
+            description: Use dynamicreturndata[8]
+          9:
+            name: byte_9
+            description: Use dynamicreturndata[9]
+          10:
+            name: byte_10
+            description: Use dynamicreturndata[10]
+      - name: power_off_flags
+        size: 1
+        description: Bit N = pin N+1 long-press power-off on latched devices (ignored if not latched)
+        bits:
+          0:
+            name: pin_1
+          1:
+            name: pin_2
+          2:
+            name: pin_3
+          3:
+            name: pin_4
+          4:
+            name: pin_5
+          5:
+            name: pin_6
+          6:
+            name: pin_7
+          7:
+            name: pin_8
+      - name: power_off_hold_sec
+        size: 1
+        description: Seconds to hold before power-off (0 = default 3 s; latched devices only)
+      - name: reserved
+        size: 12
+        description: Reserved bytes for future use
+    38:
+      name: wifi_config
+      required: false
+      repeatable: false
+      description: WiFi network configuration (SSID, password, encryption type, server URL and port)
+      fields:
+      - name: ssid
+        size: 32
+        description: WiFi SSID (network name), fixed 32 bytes (null-terminated, padded with zeros)
+      - name: password
+        size: 32
+        description: WiFi password, fixed 32 bytes (null-terminated, padded with zeros, empty for open networks)
+      - name: encryption_type
+        size: 1
+        description: WiFi encryption type enum
+        enum:
+          0:
+            name: none
+            description: Open network (no encryption)
+          1:
+            name: wep
+            description: WEP
+          2:
+            name: wpa
+            description: WPA
+          3:
+            name: wpa2
+            description: WPA2
+          4:
+            name: wpa3
+            description: WPA3
+      - name: reserved
+        size: 95
+        description: Reserved for future use (must be zero)
+    39:
+      name: security_config
+      required: false
+      repeatable: false
+      description: Security and encryption configuration (pre-shared key for application-layer encryption)
+      fields:
+      - name: encryption_enabled
+        size: 1
+        description: Encryption enabled flag
+        enum:
+          0:
+            name: disabled
+            description: Encryption disabled, all commands work without authentication
+          1:
+            name: enabled
+            description: Encryption enabled, authentication required for sensitive commands
+      - name: encryption_key
+        size: 16
+        description: AES-128 master encryption key (16 bytes). If all zeros, encryption is disabled regardless of encryption_enabled flag
+      - name: session_timeout_seconds
+        size: 2
+        description: Session timeout in seconds (0 = no timeout, session persists until disconnect)
+      - name: flags
+        size: 1
+        description: Security flags bitfield
+        bits:
+          0:
+            name: rewrite_allowed
+            description: Allow unauthenticated config writes when encryption is enabled
+          1:
+            name: show_key_on_screen
+            description: Show encryption key on screen (future feature)
+          2:
+            name: reset_pin_enabled
+            description: Reset pin enabled (must be set for reset pin to work)
+          3:
+            name: reset_pin_polarity
+            description: Reset pin polarity (0 = LOW triggers reset, 1 = HIGH triggers reset)
+          4:
+            name: reset_pin_pullup
+            description: Enable pullup on reset pin
+          5:
+            name: reset_pin_pulldown
+            description: Enable pulldown on reset pin
+      - name: reset_pin
+        size: 1
+        description: Reset pin number. When enabled and triggered, securely erases config and reboots
+      - name: reserved
+        size: 43
+        description: Reserved bytes for future use
+    40:
+      name: touch_controller
+      required: false
+      repeatable: true
+      description: Capacitive touch controller on I2C (e.g. GT911). Publishes the first contact into dynamicreturndata (5 bytes), same BLE manufacturer data path as buttons. Byte0 low nibble 1–5 = finger down count; 6 = released (last x/y retained in bytes 1–4); 0 with zeros = never touched.
+      fields:
+      - name: instance_number
+        size: 1
+        description: Unique index for multiple touch blocks (0-based)
+      - name: touch_ic_type
+        size: 2
+        description: Touch controller IC enum
+        enum:
+          0:
+            name: none
+            description: Disabled
+          1:
+            name: gt911
+            description: Goodix GT911 (I2C)
+      - name: bus_id
+        size: 1
+        description: data_bus instance for I2C (0–3). Use 0xFF to mean bus 0. On boards with separate sensor/touch buses (e.g. reTerminal Sticky MISC=0, TP=1), point touch at the TP bus index.
+      - name: i2c_addr_7bit
+        size: 1
+        description: I2C 7-bit address (GT911 0x5D or 0x14). 0 or 0xFF = auto-detect after reset
+      - name: int_pin
+        size: 1
+        description: Interrupt GPIO (active low), 0xFF = poll only
+      - name: rst_pin
+        size: 1
+        description: Reset GPIO, 0xFF = skip reset (probe only)
+      - name: display_instance
+        size: 1
+        description: Display config index for coordinate clip / invert reference (0-based)
+      - name: flags
+        size: 1
+        description: Mapping flags (bitfield)
+        bits:
+          0:
+            name: invert_x
+            description: Invert X using panel width
+          1:
+            name: invert_y
+            description: Invert Y using panel height
+          2:
+            name: swap_xy
+            description: Swap X and Y before invert/clip
+          3:
+            name: reserved_3
+          4:
+            name: reserved_4
+          5:
+            name: reserved_5
+          6:
+            name: reserved_6
+          7:
+            name: reserved_7
+      - name: poll_interval_ms
+        size: 1
+        description: Minimum time between polls (0 = default 25 ms)
+      - name: touch_data_start_byte
+        size: 1
+        description: Start index in dynamicreturndata for 5-byte touch block (0–6; avoid overlap with binary_inputs). Encoding see touch_controller description (nibble 6 = release).
+      - name: enable_pin
+        size: 1
+        description: Optional touch panel power enable GPIO (active high); 0 or 0xFF = unused
+      - name: reserved
+        size: 20
+        description: Reserved for future config (e.g. GT911 register profile)
+    41:
+      name: passive_buzzer
+      required: false
+      repeatable: true
+      description: Passive piezo buzzer (PWM). Frequency in activate command is 8-bit index; 0 = silence/rest, 1–255 = low..high tone range. Command 0x0075 payload after instance byte is outer_repeats, pattern_count, then per pattern n_steps and n_steps × (freq_u8, duration_u8). Duration units are fixed by firmware.
+      fields:
+      - name: instance_number
+        size: 1
+        description: Unique index (0-based)
+      - name: drive_pin
+        size: 1
+        description: GPIO for PWM / square wave to buzzer (via transistor)
+      - name: enable_pin
+        size: 1
+        description: Optional enable (e.g. FET); 0xFF = unused
+      - name: flags
+        size: 1
+        description: Bit 0 = enable pin active high; bit 1 = chirp on button press
+        bits:
+          0:
+            name: enable_active_high
+            description: Enable pin is active high when set; otherwise active low
+          1:
+            name: button_press
+            description: Short buzzer chirp on button press (including button-wake synthetic click)
+          2:
+            name: reserved_2
+          3:
+            name: reserved_3
+          4:
+            name: reserved_4
+          5:
+            name: reserved_5
+          6:
+            name: reserved_6
+          7:
+            name: reserved_7
+      - name: duty_percent
+        size: 1
+        description: PWM duty 1–100; 0 = default 50
+      - name: reserved
+        size: 27
+        description: Reserved bytes for future use (includes internal frequency/time scaling fields)
+    42:
+      name: nfc_config
+      required: false
+      repeatable: true
+      description: NFC config. Explicitly enables NFC init, selects NFC IC and data_bus, optional field-detect GPIO mapping into dynamicreturndata for BLE advertising button-like state.
+      fields:
+      - name: instance_number
+        size: 1
+        description: Unique index (0-based)
+      - name: nfc_ic_type
+        size: 1
+        description: NFC IC type enum
+        enum:
+          0:
+            name: auto
+            description: Auto (TNB132M on Silabs; SoC NFCT on nRF54LM20)
+          1:
+            name: tnb132m
+            description: TNB132M / Type-3 flow (external IC + I2C data_bus)
+          2:
+            name: soc_nfct
+            description: SoC NFCT Type-2 tag (nRF54LM20 N1/N2 antenna pads; bus/power pins ignored)
+      - name: bus_instance
+        size: 1
+        description: data_bus instance to use (I2C)
+      - name: flags
+        size: 1
+        description: NFC flags (bitfield)
+        bits:
+          0:
+            name: enabled
+            description: Must be set to enable NFC init (no fallback init if clear)
+          1:
+            name: reserved_1
+          2:
+            name: reserved_2
+          3:
+            name: reserved_3
+          4:
+            name: reserved_4
+          5:
+            name: reserved_5
+          6:
+            name: reserved_6
+          7:
+            name: reserved_7
+      - name: field_detect_pin
+        size: 1
+        description: GPIO pin for field detect input, 0xFF = disabled
+      - name: field_detect_mode
+        size: 1
+        description: Field detect mode enum
+        enum:
+          0:
+            name: disabled
+            description: Field-detect logic disabled
+          1:
+            name: gpio_level
+            description: GPIO level sampled/polled
+          2:
+            name: irq_latched
+            description: Reserved for interrupt-latched mode
+      - name: field_detect_active
+        size: 1
+        description: Active level enum for field_detect_pin
+        enum:
+          0:
+            name: active_low
+            description: Field present when GPIO is LOW
+          1:
+            name: active_high
+            description: Field present when GPIO is HIGH
+      - name: field_detect_debounce_ms
+        size: 1
+        description: Debounce time in milliseconds (0 = no debounce)
+      - name: power_pin
+        size: 1
+        description: NFC rail enable pin (0xFF = use data_bus pin_3 if present, else none)
+      - name: power_active
+        size: 1
+        description: Power pin polarity (reserved in current firmware)
+        enum:
+          0:
+            name: active_low
+          1:
+            name: active_high
+      - name: power_on_delay_ms
+        size: 1
+        description: Delay after enabling power before NFC access (ms)
+      - name: power_off_delay_ms
+        size: 1
+        description: Delay before power-off/park (reserved in current firmware)
+      - name: adv_button_byte_index
+        size: 1
+        description: dynamicreturndata byte index (0-10) for field-detect button-like state
+      - name: adv_button_button_id
+        size: 1
+        description: 3-bit button id (stored in lower bits)
+      - name: reserved_pin_1
+        size: 1
+        description: Reserved pin field
+      - name: reserved_pin_2
+        size: 1
+        description: Reserved pin field
+      - name: reserved
+        size: 16
+        description: Reserved bytes for future NFC IC-specific extensions
+    43:
+      name: flash_config
+      required: false
+      repeatable: true
+      description: External flash config. Enables flash deep-sleep pin sequencing using configured SPI-like pins; ignored when disabled.
+      fields:
+      - name: instance_number
+        size: 1
+        description: Unique index (0-based)
+      - name: flash_ic_type
+        size: 1
+        description: Flash IC type enum (reserved for future)
+        enum:
+          0:
+            name: auto
+            description: Generic SPI flash deep-sleep command flow
+      - name: bus_instance
+        size: 1
+        description: Reserved for future bus binding
+      - name: flags
+        size: 1
+        description: Flash flags (bitfield)
+        bits:
+          0:
+            name: enabled
+            description: Must be set to enable flash pin config/deep-sleep sequence
+          1:
+            name: reserved_1
+          2:
+            name: reserved_2
+          3:
+            name: reserved_3
+          4:
+            name: reserved_4
+          5:
+            name: reserved_5
+          6:
+            name: reserved_6
+          7:
+            name: reserved_7
+      - name: mosi_pin
+        size: 1
+        description: SPI MOSI pin (0xPN)
+      - name: sck_pin
+        size: 1
+        description: SPI SCK pin (0xPN)
+      - name: cs_pin
+        size: 1
+        description: SPI CS pin (0xPN)
+      - name: power_pin
+        size: 1
+        description: Optional power enable pin (reserved in current firmware)
+      - name: power_active
+        size: 1
+        description: Power pin polarity (reserved in current firmware)
+      - name: power_on_delay_ms
+        size: 1
+        description: Power-on delay before first command (reserved in current firmware)
+      - name: power_off_delay_ms
+        size: 1
+        description: Power-off delay after command (reserved in current firmware)
+      - name: mode
+        size: 1
+        description: Flash mode selector (reserved for future)
+      - name: miso_pin
+        size: 1
+        description: SPI MISO pin (0xPN); 0 or 0xFF = unused
+      - name: wp_pin
+        size: 1
+        description: SPI WP (IO2) pin (0xPN); 0 or 0xFF = unused
+      - name: hold_pin
+        size: 1
+        description: SPI HOLD (IO3) pin (0xPN); 0 or 0xFF = unused
+      - name: reserved
+        size: 17
+        description: Reserved bytes for future flash extensions
+    44:
+      name: data_extended
+      required: false
+      repeatable: false
+      description: Extended device identity strings. Each field is a fixed 32-byte null-terminated UTF-8 string, zero-padded. Default value for all fields is empty string.
+      fields:
+      - name: manufacturer_name
+        size: 32
+        type: text
+        description: Manufacturer name (null-terminated, zero-padded)
+      - name: model_name
+        size: 32
+        type: text
+        description: Model name (null-terminated, zero-padded)
+      - name: serial_number
+        size: 32
+        type: text
+        description: Serial number (null-terminated, zero-padded)
+      - name: friendly_name
+        size: 32
+        type: text
+        description: Human-friendly device name (null-terminated, zero-padded)
+      - name: device_location
+        size: 32
+        type: text
+        description: Physical or logical location of the device (null-terminated, zero-padded)
+      - name: device_id
+        size: 32
+        type: text
+        description: Unique device identifier string (null-terminated, zero-padded)
+      - name: custom_string_1
+        size: 32
+        type: text
+        description: User-defined string field 1 (null-terminated, zero-padded)
+      - name: custom_string_2
+        size: 32
+        type: text
+        description: User-defined string field 2 (null-terminated, zero-padded)
+      - name: custom_string_3
+        size: 32
+        type: text
+        description: User-defined string field 3 (null-terminated, zero-padded)
+    45:
+      name: findmy_config
+      required: false
+      repeatable: false
+      description: >
+        Network G (FMDN) and network A (legacy offline-finding) provisioning. Prefer secp160r1
+        with advertisement_key = generate_eid(eik, 0) (static, no device clock).
+        secp256r1 rotates on-device from eik + time_base_unix.
+        Network A uses net_a_enable plus net_a_adv_key = 28-byte
+        advertisement public key X from your A-side provisioning tool.
+        net_a_time_base is unused (static mode). Unused bytes must be zero.
+      fields:
+      - name: flags
+        size: 1
+        description: Enable flags and future reserved bits
+        bits:
+          0:
+            name: fmdn_enable
+            description: Enable network G (FMDN) advertising
+          1:
+            name: net_a_enable
+            description: Enable network A (legacy offline-finding) advertising
+          2:
+            name: reserved_2
+          3:
+            name: reserved_3
+          4:
+            name: reserved_4
+          5:
+            name: reserved_5
+          6:
+            name: reserved_6
+          7:
+            name: reserved_7
+      - name: fmdn_k
+        size: 1
+        description: FMDN rotation period exponent K (typically 10 for network G)
+      - name: fmdn_curve
+        size: 1
+        description: FMDN EID curve / advertise mode
+        enum:
+          0:
+            name: secp160r1
+            description: Static 20-byte EID via advertisement_key (network G compatible)
+          1:
+            name: secp256r1
+            description: Rotating 32-byte EID from eik (extended advertising)
+      - name: reserved0
+        size: 5
+        description: Reserved bytes; must be zero
+      - name: eik
+        size: 32
+        type: bytes
+        description: Network G ephemeral identity key (64 hex chars from G-side register)
+      - name: net_a_adv_key
+        size: 28
+        type: bytes
+        description: >
+          Network A 28-byte advertisement public key X (56 hex chars).
+          From your A-side keys export (advertisement key, not private key).
+      - name: time_base_unix
+        size: 4
+        type: uint32
+        description: Unix epoch for secp256r1 rotation; write 0 for static secp160r1
+      - name: net_a_time_base
+        size: 4
+        type: uint32
+        description: Unused in static network A mode; write 0
+      - name: advertisement_key
+        size: 20
+        type: bytes
+        description: >
+          Static 20-byte SECP160 advertisement EID for network G
+          (generate_eid(eik, 0)). Required when fmdn_curve=secp160r1.
+      - name: reserved1
+        size: 32
+        type: bytes
+        description: Reserved bytes for future extensions; must be zero
+
